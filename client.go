@@ -125,5 +125,8 @@ func (c *Client) RegisterTCP(target string) (string, *clientConnState, error) {
 // （xshared/socks5 与 xshared/httpproxy 的 TCP 数据面经此接入通道池）。
 func (c *Client) StreamDialer() dialer.Dialer { return c.pool.streamDialer() }
 
+// ProxyDialer 返回组合拨号器（TCP + UDP ASSOCIATE），供 xshared SOCKS5 服务器使用
+func (c *Client) ProxyDialer() dialer.Dialer { return &combinedDialer{pool: c.pool} }
+
 // UDPDialer 返回可选的 UDP 通道拨号器（通道竞争 + 懒启动 MsgUDPConnect）。
 func (c *Client) UDPDialer() dialer.UDPDialer { return c.pool.udpDialer() }

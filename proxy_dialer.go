@@ -132,6 +132,19 @@ func (s *pipeStream) SetDeadline(t time.Time) error      { return nil }
 func (s *pipeStream) SetReadDeadline(t time.Time) error  { return nil }
 func (s *pipeStream) SetWriteDeadline(t time.Time) error { return nil }
 
+// combinedDialer 同时具备 TCP 流与 UDP 通道能力。
+// xshared/socks5 服务器持单一拨号器并以 \`dialer.UDPDialer\` 断言探测 UDP 能力，
+// 因此 SOCKS5 场景应使用本类型（UDP ASSOCIATE 可用）；纯 TCP 消费方用 poolStreamDialer 即可。
+type combinedDialer struct{ pool *clientPool }
+
+func (d *combinedDialer) DialStream(ctx context.Context, target string) (net.Conn, error) {
+	return (&poolStreamDialer{pool: d.pool}).DialStream(ctx, target)
+}
+
+func (d *combinedDialer) DialUDP(ctx context.Context, blockedPorts []int) (dialer.UDPChannel, error) {
+	return (&poolUDPDialer{pool: d.pool}).DialUDP(ctx, blockedPorts)
+}
+
 // ---- UDP ----
 
 type poolUDPDialer struct{ pool *clientPool }

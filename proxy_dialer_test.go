@@ -180,3 +180,8 @@ func TestAuthEqual(t *testing.T) {
 var _ dialer.Dialer = (*poolStreamDialer)(nil)
 var _ dialer.UDPDialer = (*poolUDPDialer)(nil)
 var _ udpDownlinkSink = (*poolUDPChannel)(nil)
+
+func TestCombinedDialerImplementsDialer(t *testing.T) {
+	var _ dialer.Dialer = (*combinedDialer)(nil)
+	var _ dialer.UDPDialer = (*combinedDialer)(nil)
+}
