@@ -91,6 +91,9 @@ type clientPool struct {
 	// 通道就绪计数（用于延迟启动 PairWarmer）
 	readyChannels int32
 
+	// 主动重连信号（网络切换时由 Reconnect 触发）
+	reconnectCh chan struct{}
+
 	// 优雅关闭
 	shutdownOnce sync.Once
 	dialWG       sync.WaitGroup // 跟踪 dialAndServe goroutine 退出
@@ -118,6 +121,7 @@ func newClientPool(cfg *Config, ctx context.Context, cancel context.CancelFunc) 
 		backpressureState: int32(protocol.BackpressureNormal),
 		resumeCh:          make(chan struct{}, 1),
 		chReadyCh:         make(chan int, 64),
+		reconnectCh:       make(chan struct{}, 1),
 		chInvalidCh:       make(chan int, 64),
 	}
 
@@ -139,6 +143,9 @@ func newClientPool(cfg *Config, ctx context.Context, cancel context.CancelFunc) 
 
 // Start 启动连接池
 func (p *clientPool) Start(relayNodes []string) {
+	// 网络切换重连监听（Android NotifyNetworkChanged / CLI 手动重连）
+	go p.reconnectLoop()
+
 	// 启动 ECH 管理器（首次加载完成后再继续拨号）
 	if p.config.EnableECH {
 		// 共享 ECH：配置懒加载，首次拨号时按需获取（DoH 优先，UDP DNS 回退）
@@ -291,6 +298,38 @@ func (p *clientPool) goDialAndServe(idx int, ip string) {
 }
 
 // delayedStartPairWarmer 等待所有通道就绪后再启动 PairWarmer
+// reconnectLoop 响应主动重连信号：关闭所有当前 WebSocket，
+// 由 dialAndServe 循环在新网络上立即重建通道（无需等待 TCP 死链检测）。
+func (p *clientPool) reconnectLoop() {
+	for {
+		select {
+		case <-p.ctx.Done():
+			return
+		case <-p.reconnectCh:
+			log.Printf("[客户端] 收到重连信号，强制重建所有通道")
+			p.wsConnsMu.Lock()
+			for _, ws := range p.wsConns {
+				if ws != nil {
+					_ = ws.Close()
+				}
+			}
+			p.wsConnsMu.Unlock()
+		}
+	}
+}
+
+// Reconnect 请求连接池立即重建通道（Android 网络切换/手动重连）。
+func (p *clientPool) Reconnect(reason string) {
+	if p.reconnectCh == nil {
+		return
+	}
+	log.Printf("[客户端] 重连请求: %s", reason)
+	select {
+	case p.reconnectCh <- struct{}{}:
+	default:
+	}
+}
+
 func (p *clientPool) delayedStartPairWarmer(expectedCount int) {
 	log.Printf("[PairWarmer] 等待 %d 个通道就绪后启动...", expectedCount)
 	timeout := time.NewTimer(30 * time.Second)

@@ -74,6 +74,16 @@ func (c *Client) Start() error {
 	return nil
 }
 
+// Reconnect 触发重连：强制关闭现有 WebSocket 通道，
+// 连接池会立即在新网络上重建（Android 网络切换时不再等待 TCP 死链检测）。
+func (c *Client) Reconnect(reason string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.pool != nil {
+		c.pool.Reconnect(reason)
+	}
+}
+
 // Shutdown 优雅关闭客户端
 func (c *Client) Shutdown() error {
 	c.mu.Lock()
