@@ -24,6 +24,11 @@ const (
 	MsgBackpressure
 	MsgPrebindRequest MessageType = 0x10 // 预绑定请求
 	MsgChannelReset   MessageType = 0x11 // 通道重置通知
+
+	// 反向通道控制消息（加法式变更：旧端 switch 无此 case 自动忽略）。
+	// 语义见 xtunnel-cli 仓 docs/superpowers/specs/2026-09-23-reverse-mode-design.md
+	MsgReverseListen       MessageType = 0x20 // 客户端→服务端：请求服务端开启反向监听，meta=监听参数值原文（如 socks5://user:pass@0.0.0.0:30000），connID=监听器 ID
+	MsgReverseListenResult MessageType = 0x21 // 服务端→客户端：监听注册结果，meta[0]=状态(ConnStatus)，meta[1:]=失败原因文本
 )
 
 // PrebindTarget 预绑定目标标识
