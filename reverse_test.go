@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"net"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -383,16 +384,120 @@ func TestReversePrebind(t *testing.T) {
 		t.Fatalf("expected uplink channel 1, got %d", binary.BigEndian.Uint32(gotMeta))
 	}
 
-	// 服务端回 MsgSelectDownlink → 预绑定状态应被清理（不拨号）
+	// 服务端回 MsgSelectDownlink([P2]) → 选路全部完成，warm 状态保留等待提升
 	if err := serverConn.WriteMessage(websocket.BinaryMessage, protocol.EncodeMessage(protocol.MsgSelectDownlink, connID, be32(1), nil)); err != nil {
 		t.Fatalf("write MsgSelectDownlink: %v", err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		rc := p.getReverseConn(connID)
+		if rc != nil && atomic.LoadInt32(&rc.sendCh) == 1 {
+			if atomic.LoadInt32(&rc.prebind) != 1 {
+				t.Fatal("state should still be warm (prebind=1)")
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("warm state not settled: rc=%v sendCh=%d", rc != nil, func() int {
+				if rc == nil {
+					return -1
+				}
+				return int(atomic.LoadInt32(&rc.sendCh))
+			}())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestReverseWarmPromotion 预热 Pair 消费：拨号期零选路消息——
+// MsgTCPConnect（复用 prebind connID）直接提升 warm 状态并拨号，不广播 MsgSelectUplink
+func TestReverseWarmPromotion(t *testing.T) {
+	clientConn, serverConn, cleanup := newClientTestWebSocketPair(t)
+	defer cleanup()
+
+	cfg := DefaultConfig()
+	cfg.EnableReverse = true
+	cfg.Connections = 1
+	cfg.ConnectTimeout = 2 * time.Second
+	cfg.WriteTimeout = 2 * time.Second
+	p := newReverseTestPool(t, cfg, clientConn)
+
+	targetLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen target: %v", err)
+	}
+	defer targetLn.Close()
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		c, err := targetLn.Accept()
+		if err == nil {
+			accepted <- c
+		}
+	}()
+	target := targetLn.Addr().String()
+
+	done := make(chan struct{})
+	go func() {
+		p.handleChannel(1, clientConn)
+		close(done)
+	}()
+	t.Cleanup(func() { _ = clientConn.Close() })
+
+	// 1. 预热握手三步：PrebindRequest → SelectUplink → SelectDownlink([P2])
+	connID := "prebind-warm-1"
+	meta := append([]byte{byte(protocol.IPStrategyDefault)}, []byte(protocol.PrebindTarget)...)
+	if err := serverConn.WriteMessage(websocket.BinaryMessage, protocol.EncodeMessage(protocol.MsgPrebindRequest, connID, meta, nil)); err != nil {
+		t.Fatalf("write MsgPrebindRequest: %v", err)
+	}
+	mtype, gotID, gotMeta, _ := readTestFrame(t, serverConn, 3*time.Second)
+	if mtype != protocol.MsgSelectUplink || gotID != connID || binary.BigEndian.Uint32(gotMeta) != 1 {
+		t.Fatalf("expected MsgSelectUplink ch=1, got type=%d id=%s meta=%v", mtype, gotID, gotMeta)
+	}
+	if err := serverConn.WriteMessage(websocket.BinaryMessage, protocol.EncodeMessage(protocol.MsgSelectDownlink, connID, be32(2), nil)); err != nil {
+		t.Fatalf("write warmup MsgSelectDownlink: %v", err)
+	}
+
+	// 2. 拨号期：服务端复用 prebind connID 单播 MsgTCPConnect 到 P1
+	meta = append([]byte{byte(protocol.IPStrategyDefault)}, []byte(target)...)
+	if err := serverConn.WriteMessage(websocket.BinaryMessage, protocol.EncodeMessage(protocol.MsgTCPConnect, connID, meta, nil)); err != nil {
+		t.Fatalf("write MsgTCPConnect: %v", err)
+	}
+
+	// 3. 期望：目标被拨通 + MsgConnStatus OK；此后不再出现任何 MsgSelectUplink
+	mtype, gotID, _, _ = readTestFrame(t, serverConn, 3*time.Second)
+	if mtype != protocol.MsgConnStatus || gotID != connID {
+		t.Fatalf("expected MsgConnStatus for warm promotion, got type=%d id=%s", mtype, gotID)
+	}
+	var dialed net.Conn
+	select {
+	case dialed = <-accepted:
+	case <-time.After(3 * time.Second):
+		t.Fatal("target was never dialed")
+	}
+
+	// 4. 数据往返：上行走 sendCh=P2? —— 此测试只有通道 1，
+	//    P2=2 是虚拟通道号，客户端 sendCh=2 单播会失败 → 读泵回退广播仍可达。
+	//    下行经 recvCh=1 正常。
+	if err := serverConn.WriteMessage(websocket.BinaryMessage, protocol.EncodeMessage(protocol.MsgTCPData, connID, nil, []byte("REQ"))); err != nil {
+		t.Fatalf("write MsgTCPData: %v", err)
+	}
+	_ = dialed.SetReadDeadline(time.Now().Add(3 * time.Second))
+	buf := make([]byte, 16)
+	n, err := dialed.Read(buf)
+	if err != nil || string(buf[:n]) != "REQ" {
+		t.Fatalf("dialed conn got %q err=%v, want REQ", string(buf[:max(n, 0)]), err)
+	}
+
+	// 5. 服务端关闭连接
+	if err := serverConn.WriteMessage(websocket.BinaryMessage, protocol.EncodeMessage(protocol.MsgTCPClose, connID, nil, nil)); err != nil {
+		t.Fatalf("write MsgTCPClose: %v", err)
 	}
 	deadline := time.Now().Add(2 * time.Second)
 	for p.hasReverseConn(connID) && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	if p.hasReverseConn(connID) {
-		t.Fatal("prebind state should be cleaned after MsgSelectDownlink")
+		t.Fatal("reverse conn not cleaned after MsgTCPClose")
 	}
 }
 
