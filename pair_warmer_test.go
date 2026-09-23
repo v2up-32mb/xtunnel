@@ -2,8 +2,12 @@ package xtunnel
 
 import (
 	"context"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/v2up-32mb/xtunnel/protocol"
 )
 
 func newTestClientPool(cfg *Config) *clientPool {
@@ -541,5 +545,91 @@ func TestPairWarmerReleasePairReElectsPrimary(t *testing.T) {
 	w.mu.RUnlock()
 	if prim != backup {
 		t.Fatal("expected backup re-elected as primary after release")
+	}
+}
+
+// TestRegisterConcurrentDialsDistinctConnIDs 回归：正向 Pair 为共享复用，
+// 并发连接各自复用同一对预热通道时，connID 必须保持每连接唯一
+// （禁止把 prebind connID 用作连接 connID——并发时互相覆盖/被服务端当重复丢弃）。
+func TestRegisterConcurrentDialsDistinctConnIDs(t *testing.T) {
+	clientConn, serverConn, cleanup := newClientTestWebSocketPair(t)
+	defer cleanup()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cfg := DefaultConfig()
+	cfg.EnableHotPair = true
+	cfg.Connections = 1
+	p, err := newClientPool(cfg, ctx, cancel)
+	if err != nil {
+		t.Fatalf("newClientPool: %v", err)
+	}
+	p.wsConns[0] = clientConn
+	go p.writeWorker(0, clientConn, p.writeQueues[0])
+	t.Cleanup(func() { _ = clientConn.Close() })
+
+	pair := &HotChannelPair{
+		ID:           "01",
+		UplinkChID:   1,
+		DownlinkChID: 1,
+		state:        int32(PairStateReady),
+	}
+	p.pairWarmer.SetPrimaryForTest(pair)
+
+	done := make(chan struct{})
+	go func() {
+		p.handleChannel(1, clientConn)
+		close(done)
+	}()
+
+	// 同一 Pair 上并发注册多个连接
+	const n = 4
+	ids := make([]string, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			ids[i] = fmt.Sprintf("req-%d", i)
+			p.RegisterAndBroadcastTCP(ids[i], fmt.Sprintf("target-%d:80", i), nil, nil, "TEST")
+		}(i)
+	}
+	wg.Wait()
+
+	// 所有连接的 connID 互不相同（调用方 requestID 原样生效）
+	seen := make(map[string]bool, n)
+	p.mu.RLock()
+	for _, id := range ids {
+		if seen[id] {
+			p.mu.RUnlock()
+			t.Fatalf("duplicate connID %q across concurrent dials", id)
+		}
+		seen[id] = true
+		if _, ok := p.conns[id]; !ok {
+			p.mu.RUnlock()
+			t.Fatalf("conn state %q missing", id)
+		}
+	}
+	p.mu.RUnlock()
+
+	// 服务端收到 n 个 MsgTCPConnect，connID 各不相同
+	gotIDs := make(map[string]bool, n)
+	_ = serverConn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	for len(gotIDs) < n {
+		_, raw, err := serverConn.ReadMessage()
+		if err != nil {
+			t.Fatalf("read dial %d: %v", len(gotIDs), err)
+		}
+		mtype, connID, _, _, err := protocol.DecodeMessage(raw)
+		if err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if mtype != protocol.MsgTCPConnect {
+			continue
+		}
+		if gotIDs[connID] {
+			t.Fatalf("server got duplicate connID %q", connID)
+		}
+		gotIDs[connID] = true
 	}
 }
