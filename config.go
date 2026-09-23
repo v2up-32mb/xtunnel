@@ -50,8 +50,8 @@ type Config struct {
 	UDPBlockedPorts []int // UDP 拦截端口列表
 
 	// 反向通道配置（客户端作为出口；设计见 xtunnel-cli 仓 docs/superpowers/specs/2026-09-23-reverse-mode-design.md）
-	EnableReverse    bool     // 启用反向模式：本地 -l 参数值不再开本地监听，而是发送给服务端由其开监听
-	ReverseListeners []string // 反向监听参数列表（CLI 从 -l 解析后填入，如 socks5://user:pass@0.0.0.0:30000）
+	EnableReverse    bool        // 启用反向模式：本地 -l 参数值不再开本地监听，而是发送给服务端由其开监听
+	ReverseListeners []string    // 反向监听参数列表（CLI 从 -l 解析后填入，如 socks5://user:pass@0.0.0.0:30000）
 	OnReverseError   func(error) // 可选：反向监听全部注册失败时回调（客户端用它 fatal 退出；nil 则仅记日志）
 
 	// 缓冲区大小
