@@ -353,70 +353,15 @@ func TestReverseListenOKSuppressesCallback(t *testing.T) {
 	}
 }
 
-// TestReversePrebind 预绑定：不拨号、回 MsgSelectUplink、选路完成即清理
-func TestReversePrebind(t *testing.T) {
+// TestReverseHotPromotion 预热热路径：connID 带 Pair 键前缀 + 到达通道==表项收包通道
+// → 直接提升为真实连接，零选路消息（不广播 MsgSelectUplink）
+func TestReverseHotPromotion(t *testing.T) {
 	clientConn, serverConn, cleanup := newClientTestWebSocketPair(t)
 	defer cleanup()
 
 	cfg := DefaultConfig()
 	cfg.EnableReverse = true
-	cfg.Connections = 1
-	p := newReverseTestPool(t, cfg, clientConn)
-
-	done := make(chan struct{})
-	go func() {
-		p.handleChannel(1, clientConn)
-		close(done)
-	}()
-	t.Cleanup(func() { _ = clientConn.Close() })
-
-	connID := "prebind-test-1"
-	meta := append([]byte{byte(protocol.IPStrategyDefault)}, []byte(protocol.PrebindTarget)...)
-	if err := serverConn.WriteMessage(websocket.BinaryMessage, protocol.EncodeMessage(protocol.MsgPrebindRequest, connID, meta, nil)); err != nil {
-		t.Fatalf("write MsgPrebindRequest: %v", err)
-	}
-
-	mtype, gotID, gotMeta, _ := readTestFrame(t, serverConn, 3*time.Second)
-	if mtype != protocol.MsgSelectUplink || gotID != connID {
-		t.Fatalf("expected MsgSelectUplink for prebind, got type=%d id=%s", mtype, gotID)
-	}
-	if binary.BigEndian.Uint32(gotMeta) != 1 {
-		t.Fatalf("expected uplink channel 1, got %d", binary.BigEndian.Uint32(gotMeta))
-	}
-
-	// 服务端回 MsgSelectDownlink([P2]) → 选路全部完成，warm 状态保留等待提升
-	if err := serverConn.WriteMessage(websocket.BinaryMessage, protocol.EncodeMessage(protocol.MsgSelectDownlink, connID, be32(1), nil)); err != nil {
-		t.Fatalf("write MsgSelectDownlink: %v", err)
-	}
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		rc := p.getReverseConn(connID)
-		if rc != nil && atomic.LoadInt32(&rc.sendCh) == 1 {
-			if atomic.LoadInt32(&rc.prebind) != 1 {
-				t.Fatal("state should still be warm (prebind=1)")
-			}
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("warm state not settled: rc=%v sendCh=%d", rc != nil, func() int {
-				if rc == nil {
-					return -1
-				}
-				return int(atomic.LoadInt32(&rc.sendCh))
-			}())
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-}
-
-// TestReverseWarmPromotion 预热 Pair 消费：拨号期零选路消息——
-// MsgTCPConnect（复用 prebind connID）直接提升 warm 状态并拨号，不广播 MsgSelectUplink
-func TestReverseWarmPromotion(t *testing.T) {
-	clientConn, serverConn, cleanup := newClientTestWebSocketPair(t)
-	defer cleanup()
-
-	cfg := DefaultConfig()
-	cfg.EnableReverse = true
+	cfg.EnableHotPair = true
 	cfg.Connections = 1
 	cfg.ConnectTimeout = 2 * time.Second
 	cfg.WriteTimeout = 2 * time.Second
@@ -443,30 +388,31 @@ func TestReverseWarmPromotion(t *testing.T) {
 	}()
 	t.Cleanup(func() { _ = clientConn.Close() })
 
-	// 1. 预热握手三步：PrebindRequest → SelectUplink → SelectDownlink([P2])
-	connID := "prebind-warm-1"
-	meta := append([]byte{byte(protocol.IPStrategyDefault)}, []byte(protocol.PrebindTarget)...)
-	if err := serverConn.WriteMessage(websocket.BinaryMessage, protocol.EncodeMessage(protocol.MsgPrebindRequest, connID, meta, nil)); err != nil {
-		t.Fatalf("write MsgPrebindRequest: %v", err)
+	// 本地热表登记预热 Pair：键 prebind-key-1，收包通道(Downlink)=1、发包通道(Uplink)=1
+	// （单通道测试环境收发同通道；真实环境上下行分属不同通道）
+	pair := &HotChannelPair{
+		ID:           "01",
+		PrebindID:    "prebind-key-1",
+		UplinkChID:   1,
+		DownlinkChID: 1,
+		state:        int32(PairStateReady),
 	}
-	mtype, gotID, gotMeta, _ := readTestFrame(t, serverConn, 3*time.Second)
-	if mtype != protocol.MsgSelectUplink || gotID != connID || binary.BigEndian.Uint32(gotMeta) != 1 {
-		t.Fatalf("expected MsgSelectUplink ch=1, got type=%d id=%s meta=%v", mtype, gotID, gotMeta)
-	}
-	if err := serverConn.WriteMessage(websocket.BinaryMessage, protocol.EncodeMessage(protocol.MsgSelectDownlink, connID, be32(2), nil)); err != nil {
-		t.Fatalf("write warmup MsgSelectDownlink: %v", err)
-	}
+	p.pairWarmer.mu.Lock()
+	p.pairWarmer.pairs = append(p.pairWarmer.pairs, pair)
+	p.pairWarmer.primary = pair
+	p.pairWarmer.mu.Unlock()
 
-	// 2. 拨号期：服务端复用 prebind connID 单播 MsgTCPConnect 到 P1
-	meta = append([]byte{byte(protocol.IPStrategyDefault)}, []byte(target)...)
+	// 服务端（拨号方）按约定组合 connID 并单播 MsgTCPConnect 到 ChB
+	connID := protocol.HotPairConnID(pair.PrebindID, "conn-a")
+	meta := append([]byte{byte(protocol.IPStrategyDefault)}, []byte(target)...)
 	if err := serverConn.WriteMessage(websocket.BinaryMessage, protocol.EncodeMessage(protocol.MsgTCPConnect, connID, meta, nil)); err != nil {
 		t.Fatalf("write MsgTCPConnect: %v", err)
 	}
 
-	// 3. 期望：目标被拨通 + MsgConnStatus OK；此后不再出现任何 MsgSelectUplink
-	mtype, gotID, _, _ = readTestFrame(t, serverConn, 3*time.Second)
-	if mtype != protocol.MsgConnStatus || gotID != connID {
-		t.Fatalf("expected MsgConnStatus for warm promotion, got type=%d id=%s", mtype, gotID)
+	// 期望：直接 MsgConnStatus OK（无 MsgSelectUplink），目标被拨通，sendCh 已按表预置
+	mtype, gotID, gotMeta, _ := readTestFrame(t, serverConn, 3*time.Second)
+	if mtype != protocol.MsgConnStatus || gotID != connID || gotMeta[0] != byte(protocol.StatusOK) {
+		t.Fatalf("expected MsgConnStatus OK for hot promotion, got type=%d id=%s", mtype, gotID)
 	}
 	var dialed net.Conn
 	select {
@@ -474,10 +420,11 @@ func TestReverseWarmPromotion(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("target was never dialed")
 	}
+	if rc := p.getReverseConn(connID); rc == nil || atomic.LoadInt32(&rc.sendCh) != 1 {
+		t.Fatalf("sendCh not preset from pair table: rc=%v", rc != nil)
+	}
 
-	// 4. 数据往返：上行走 sendCh=P2? —— 此测试只有通道 1，
-	//    P2=2 是虚拟通道号，客户端 sendCh=2 单播会失败 → 读泵回退广播仍可达。
-	//    下行经 recvCh=1 正常。
+	// 数据往返：下行写入本地 conn
 	if err := serverConn.WriteMessage(websocket.BinaryMessage, protocol.EncodeMessage(protocol.MsgTCPData, connID, nil, []byte("REQ"))); err != nil {
 		t.Fatalf("write MsgTCPData: %v", err)
 	}
@@ -488,7 +435,7 @@ func TestReverseWarmPromotion(t *testing.T) {
 		t.Fatalf("dialed conn got %q err=%v, want REQ", string(buf[:max(n, 0)]), err)
 	}
 
-	// 5. 服务端关闭连接
+	// 服务端关闭连接
 	if err := serverConn.WriteMessage(websocket.BinaryMessage, protocol.EncodeMessage(protocol.MsgTCPClose, connID, nil, nil)); err != nil {
 		t.Fatalf("write MsgTCPClose: %v", err)
 	}
@@ -501,8 +448,149 @@ func TestReverseWarmPromotion(t *testing.T) {
 	}
 }
 
-// TestReverseHotPairSignal 客户端 -hotpair：通道就绪时向服务端发送 MsgReverseHotPair 授权
-func TestReverseHotPairSignal(t *testing.T) {
+// TestReverseHotPromotionFallback 预热热路径回退：connID 带前缀但到达通道与表项
+// 收包通道不一致（如 Pair 已失效后的广播副本）→ 落回经典竞争路径（广播 MsgSelectUplink）
+func TestReverseHotPromotionFallback(t *testing.T) {
+	clientConn, serverConn, cleanup := newClientTestWebSocketPair(t)
+	defer cleanup()
+
+	cfg := DefaultConfig()
+	cfg.EnableReverse = true
+	cfg.EnableHotPair = true
+	cfg.Connections = 1
+	cfg.ConnectTimeout = 2 * time.Second
+	p := newReverseTestPool(t, cfg, clientConn)
+
+	targetLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen target: %v", err)
+	}
+	defer targetLn.Close()
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		c, err := targetLn.Accept()
+		if err == nil {
+			accepted <- c
+		}
+	}()
+	target := targetLn.Addr().String()
+
+	done := make(chan struct{})
+	go func() {
+		p.handleChannel(1, clientConn)
+		close(done)
+	}()
+	t.Cleanup(func() { _ = clientConn.Close() })
+
+	// 表项登记收包通道 2（与本测试唯一通道 1 不符 → 校验失败）
+	pair := &HotChannelPair{
+		ID:           "01",
+		PrebindID:    "prebind-key-2",
+		UplinkChID:   1,
+		DownlinkChID: 2,
+		state:        int32(PairStateReady),
+	}
+	p.pairWarmer.mu.Lock()
+	p.pairWarmer.pairs = append(p.pairWarmer.pairs, pair)
+	p.pairWarmer.primary = pair
+	p.pairWarmer.mu.Unlock()
+
+	connID := protocol.HotPairConnID(pair.PrebindID, "conn-b")
+	meta := append([]byte{byte(protocol.IPStrategyDefault)}, []byte(target)...)
+	if err := serverConn.WriteMessage(websocket.BinaryMessage, protocol.EncodeMessage(protocol.MsgTCPConnect, connID, meta, nil)); err != nil {
+		t.Fatalf("write MsgTCPConnect: %v", err)
+	}
+
+	// 期望：经典路径——广播 MsgSelectUplink，随后 ConnStatus OK
+	mtype, gotID, gotMeta, _ := readTestFrame(t, serverConn, 3*time.Second)
+	if mtype != protocol.MsgSelectUplink || gotID != connID || binary.BigEndian.Uint32(gotMeta) != 1 {
+		t.Fatalf("expected fallback MsgSelectUplink ch=1, got type=%d id=%s meta=%v", mtype, gotID, gotMeta)
+	}
+	mtype, gotID, _, _ = readTestFrame(t, serverConn, 3*time.Second)
+	if mtype != protocol.MsgConnStatus || gotID != connID {
+		t.Fatalf("expected MsgConnStatus, got type=%d id=%s", mtype, gotID)
+	}
+	select {
+	case <-accepted:
+	case <-time.After(3 * time.Second):
+		t.Fatal("target was never dialed")
+	}
+}
+
+// TestReverseHotPromotionUnknownKey connID 前缀在本地热表中无对应表项 → 经典路径
+func TestReverseHotPromotionUnknownKey(t *testing.T) {
+	clientConn, serverConn, cleanup := newClientTestWebSocketPair(t)
+	defer cleanup()
+
+	cfg := DefaultConfig()
+	cfg.EnableReverse = true
+	cfg.EnableHotPair = true
+	cfg.Connections = 1
+	cfg.ConnectTimeout = 2 * time.Second
+	p := newReverseTestPool(t, cfg, clientConn)
+
+	targetLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen target: %v", err)
+	}
+	defer targetLn.Close()
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		c, err := targetLn.Accept()
+		if err == nil {
+			accepted <- c
+		}
+	}()
+	target := targetLn.Addr().String()
+
+	done := make(chan struct{})
+	go func() {
+		p.handleChannel(1, clientConn)
+		close(done)
+	}()
+	t.Cleanup(func() { _ = clientConn.Close() })
+
+	connID := "prebind-unknown.conn-c"
+	meta := append([]byte{byte(protocol.IPStrategyDefault)}, []byte(target)...)
+	if err := serverConn.WriteMessage(websocket.BinaryMessage, protocol.EncodeMessage(protocol.MsgTCPConnect, connID, meta, nil)); err != nil {
+		t.Fatalf("write MsgTCPConnect: %v", err)
+	}
+
+	mtype, gotID, _, _ := readTestFrame(t, serverConn, 3*time.Second)
+	if mtype != protocol.MsgSelectUplink || gotID != connID {
+		t.Fatalf("expected classic MsgSelectUplink for unknown key, got type=%d id=%s", mtype, gotID)
+	}
+	select {
+	case <-accepted:
+	case <-time.After(3 * time.Second):
+		t.Fatal("target was never dialed")
+	}
+}
+
+// TestReverseWarmerCreatedInReverseMode 反向模式下同样创建 PairWarmer：
+// 健康维护统一由客户端负责，预热通道对通知服务端建双端热表
+func TestReverseWarmerCreatedInReverseMode(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.EnableReverse = true
+	cfg.EnableHotPair = true
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	p, _ := newClientPool(cfg, ctx, cancel)
+	if p.pairWarmer == nil {
+		t.Fatal("PairWarmer should be created when EnableHotPair (reverse mode included)")
+	}
+
+	cfgNoHP := DefaultConfig()
+	cfgNoHP.EnableReverse = true
+	cfgNoHP.EnableHotPair = false
+	p2, _ := newClientPool(cfgNoHP, nil, nil)
+	if p2.pairWarmer != nil {
+		t.Fatal("PairWarmer should not be created when hotpair disabled")
+	}
+}
+
+// TestReverseOnChannelReadyNoExtraSignal 反向通道就绪不再发送预热授权帧（0x22 已移除）
+func TestReverseOnChannelReadyNoExtraSignal(t *testing.T) {
 	clientConn, serverConn, cleanup := newClientTestWebSocketPair(t)
 	defer cleanup()
 
@@ -514,46 +602,9 @@ func TestReverseHotPairSignal(t *testing.T) {
 
 	p.reverseOnChannelReady(1)
 
-	mtype, gotID, gotMeta, gotPayload := readTestFrame(t, serverConn, 3*time.Second)
-	if mtype != protocol.MsgReverseHotPair {
-		t.Fatalf("expected MsgReverseHotPair, got %d", mtype)
-	}
-	if gotID != "" || len(gotMeta) != 0 || len(gotPayload) != 0 {
-		t.Fatalf("expected empty connID/meta/payload, got id=%q meta=%v payload=%v", gotID, gotMeta, gotPayload)
-	}
-}
-
-// TestReverseHotPairSignalDisabled 未开 -hotpair 时不发送授权
-func TestReverseHotPairSignalDisabled(t *testing.T) {
-	clientConn, serverConn, cleanup := newClientTestWebSocketPair(t)
-	defer cleanup()
-
-	cfg := DefaultConfig()
-	cfg.EnableReverse = true
-	cfg.EnableHotPair = false
-	cfg.Connections = 1
-	p := newReverseTestPool(t, cfg, clientConn)
-
-	p.reverseOnChannelReady(1)
-
+	// 无监听参数：不应有任何出帧
 	_ = serverConn.SetReadDeadline(time.Now().Add(400 * time.Millisecond))
 	if _, _, err := serverConn.ReadMessage(); err == nil {
-		t.Fatal("no MsgReverseHotPair expected when hotpair disabled")
-	}
-}
-
-// TestReverseHotPairNoForwardWarmer 反向模式下不创建正向 PairWarmer
-func TestReverseHotPairNoForwardWarmer(t *testing.T) {
-	clientConn, _, cleanup := newClientTestWebSocketPair(t)
-	defer cleanup()
-
-	cfg := DefaultConfig()
-	cfg.EnableReverse = true
-	cfg.EnableHotPair = true
-	cfg.Connections = 1
-	p := newReverseTestPool(t, cfg, clientConn)
-
-	if p.pairWarmer != nil {
-		t.Fatal("forward PairWarmer should not be created in reverse mode")
+		t.Fatal("no frame expected from reverseOnChannelReady without listeners")
 	}
 }

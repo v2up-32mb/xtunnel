@@ -62,13 +62,23 @@ func (p *clientPool) udpDialer() dialer.UDPDialer { return &poolUDPDialer{pool: 
 
 type poolStreamDialer struct{ pool *clientPool }
 
-// DialStream 完成「注册 → MsgTCPConnect（Hot Pair/广播）→ 等待连接建立」，
+// DialStream 完成「注册 → MsgTCPConnect（预热热路径/广播）→ 等待连接建立」，
 // 返回的 net.Conn 下行由池写入内存管道，上行经 SendDataDirect/广播。
+// 预热热路径：先取 Ready Pair，connID 组合为 Pair 键 + 唯一后缀，
+// 服务端按前缀查表直接获得完整收发通道，拨号期零选路消息；
+// Pair 共享复用，后缀保证并发连接 connID 互不冲突。
 func (d *poolStreamDialer) DialStream(ctx context.Context, target string) (net.Conn, error) {
 	p := d.pool
+	var pair *HotChannelPair
+	if p.config.EnableHotPair && p.pairWarmer != nil {
+		pair = p.pairWarmer.AcquirePrimary()
+	}
 	connID := uuid.NewString()
+	if pair != nil {
+		connID = protocol.HotPairConnID(pair.PrebindID, connID)
+	}
 	sink, source := newBufferedPipe()
-	p.RegisterAndBroadcastTCP(connID, target, nil, sink, "SOCKS5")
+	p.registerAndBroadcastTCPWithPair(connID, target, nil, sink, "SOCKS5", pair)
 
 	p.mu.RLock()
 	st := p.conns[connID]

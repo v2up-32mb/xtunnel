@@ -135,8 +135,9 @@ func newClientPool(cfg *Config, ctx context.Context, cancel context.CancelFunc) 
 		chInvalidCh:          make(chan int, 64),
 	}
 
-	// 反向模式下客户端不是正向拨号方，正向 PairWarmer 无意义，避免空转预绑定
-	if cfg.EnableHotPair && !cfg.EnableReverse {
+	// Hot Pair 由客户端 -hotpair 决定：健康维护（预热/刷新/失效）统一由客户端负责，
+	// 预热完成后经 MsgHotPairNotify 通知服务端建双端热表，正反两模式共用同一套机制
+	if cfg.EnableHotPair {
 		p.pairWarmer = NewPairWarmer(p, cfg)
 	}
 
@@ -925,8 +926,17 @@ func (p *clientPool) GetUplinkChannel(connID string) (int, bool) {
 	return st.uplink, true
 }
 
-// RegisterAndBroadcastTCP 注册 TCP 连接并广播连接请求
+// RegisterAndBroadcastTCP 注册 TCP 连接并广播连接请求（无预获取 Pair 的兼容入口）
 func (p *clientPool) RegisterAndBroadcastTCP(connID, target string, first []byte, tcpConn net.Conn, reqType string) {
+	p.registerAndBroadcastTCPWithPair(connID, target, first, tcpConn, reqType, nil)
+}
+
+// registerAndBroadcastTCPWithPair 注册 TCP 连接并发送连接请求。
+// pair 非空时走预热热路径：connID 已带 Pair 键前缀，单播直达上行通道；
+// 服务端按前缀查表直接获得完整收发通道，无需回发 MsgSelectUplink。
+// 热路径发送失败时清预置状态并回退广播（connID 前缀仍在，服务端查表失败
+// 自动落入经典竞争路径，客户端经典流程自愈）。
+func (p *clientPool) registerAndBroadcastTCPWithPair(connID, target string, first []byte, tcpConn net.Conn, reqType string, pair *HotChannelPair) {
 	p.mu.Lock()
 	st := p.conns[connID]
 	if st == nil {
@@ -955,32 +965,31 @@ func (p *clientPool) RegisterAndBroadcastTCP(connID, target string, first []byte
 	meta[0] = byte(p.config.IPStrategy)
 	copy(meta[1:], target)
 
-	// Hot Pair 路径：尝试获取主 Pair 并直接发送
-	if p.config.EnableHotPair && p.pairWarmer != nil {
-		pair := p.pairWarmer.AcquirePrimary()
-		if pair != nil {
-			p.mu.Lock()
-			st = p.conns[connID]
-			if st != nil {
-				st.pair = pair
-			}
-			p.mu.Unlock()
-			msg := protocol.EncodeMessage(protocol.MsgTCPConnect, connID, meta, first)
-			log.Printf("[客户端] %s 使用 Hot Pair %s (TX %d RX %d) 发送首包，ID:%s", reqType, pair.ID, pair.UplinkChID, pair.DownlinkChID, protocol.ShortID(connID))
-			if err := p.asyncWriteDirect(pair.UplinkChID, websocket.BinaryMessage, msg); err == nil {
-				return
-			}
-			// Hot Pair 上行通道发送失败：释放 Pair 并回退到广播，避免连接状态残留
-			log.Printf("[客户端] %s Hot Pair 上行通道 %d 发送失败，回退广播，ID:%s", reqType, pair.UplinkChID, protocol.ShortID(connID))
-			p.mu.Lock()
-			if st = p.conns[connID]; st != nil {
-				st.pair = nil
-			}
-			p.mu.Unlock()
-			p.pairWarmer.ReleasePair(pair)
-			p.pairWarmer.InvalidateChannel(pair.UplinkChID)
-			// 继续走广播路径
+	// 预热热路径：单播直达上行通道，预置上行通道（提升路径无 MsgSelectUplink 回帧）
+	if pair != nil {
+		p.mu.Lock()
+		st = p.conns[connID]
+		if st != nil {
+			st.pair = pair
+			st.uplink = pair.UplinkChID
 		}
+		p.mu.Unlock()
+		msg := protocol.EncodeMessage(protocol.MsgTCPConnect, connID, meta, first)
+		log.Printf("[客户端] %s 使用 Hot Pair %s (键:%s TX %d RX %d) 单播拨号，ID:%s", reqType, pair.ID, protocol.ShortID(pair.PrebindID), pair.UplinkChID, pair.DownlinkChID, protocol.ShortID(connID))
+		if err := p.asyncWriteDirect(pair.UplinkChID, websocket.BinaryMessage, msg); err == nil {
+			return
+		}
+		// 热路径发送失败：清预置状态，释放 Pair 并废弃该通道，回退广播
+		log.Printf("[客户端] %s Hot Pair 上行通道 %d 发送失败，回退广播，ID:%s", reqType, pair.UplinkChID, protocol.ShortID(connID))
+		p.mu.Lock()
+		if st = p.conns[connID]; st != nil {
+			st.pair = nil
+			st.uplink = 0
+		}
+		p.mu.Unlock()
+		p.pairWarmer.ReleasePair(pair)
+		p.pairWarmer.InvalidateChannel(pair.UplinkChID)
+		// 继续走广播路径
 	}
 
 	msg := protocol.EncodeMessage(protocol.MsgTCPConnect, connID, meta, first)
@@ -1347,10 +1356,6 @@ func (p *clientPool) handleChannel(chID int, conn *websocket.Conn) {
 		case protocol.MsgTCPConnect:
 			p.handleReverseTCPConnect(chID, connID, meta)
 			continue
-		case protocol.MsgPrebindRequest:
-			// 反向模式：服务端预热器请求客户端预绑定（镜像正向服务端 handlePrebindRequest）
-			p.handleReversePrebind(chID, connID, meta)
-			continue
 		case protocol.MsgReverseListenResult:
 			p.handleReverseListenResult(connID, meta)
 			continue
@@ -1386,8 +1391,9 @@ func (p *clientPool) handleChannel(chID int, conn *websocket.Conn) {
 				binary.BigEndian.PutUint32(downlinkBytes, uint32(chosen))
 				_ = p.asyncWriteDirect(uplinkChID, websocket.BinaryMessage, protocol.EncodeMessage(protocol.MsgSelectDownlink, connID, downlinkBytes, nil))
 
-				// 如果是预绑定请求，通知 PairWarmer 完成 Pair 构建
-				if p.pairWarmer != nil && strings.HasPrefix(connID, "prebind-") {
+				// 如果是预热请求（裸 prebind 键，无拨号后缀），通知 PairWarmer 完成 Pair 构建；
+				// 带后缀的拨号 connID 前缀相同但已脱离预热流程，不在此列
+				if p.pairWarmer != nil && strings.HasPrefix(connID, "prebind-") && !strings.Contains(connID, ".") {
 					p.pairWarmer.HandlePrebindResult(connID, uplinkChID, chosen, nil)
 				}
 			}

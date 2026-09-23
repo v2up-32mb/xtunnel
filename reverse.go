@@ -16,14 +16,11 @@ import (
 )
 
 type reverseConn struct {
-	id       string
-	target   string
-	resolved string
-	recvCh   int
-	sendCh   int32 // atomic
-	// prebind: 1=warm 预绑定状态（预热期已定收发通道，等待 MsgTCPConnect 提升）；
-	// 0=真实连接。提升用 CAS 1→0 去重。
-	prebind   int32 // atomic
+	id        string
+	target    string
+	resolved  string
+	recvCh    int
+	sendCh    int32 // atomic
 	connMu    sync.Mutex
 	conn      net.Conn
 	closeOnce sync.Once
@@ -115,13 +112,30 @@ func (p *clientPool) handleReverseTCPConnect(chID int, connID string, meta []byt
 		resolved = protocol.ResolveWithStrategy(target, p.config.IPStrategy)
 	}
 
+	// 预热热路径：connID 携带 Pair 键前缀，查本地热表直接获得完整收发通道，
+	// 零选路消息。校验到达通道==表项收包通道（服务端应在 ChB 单播）。
+	if p.pairWarmer != nil {
+		if key, _, ok := protocol.SplitHotPairConnID(connID); ok {
+			if pair := p.pairWarmer.LookupReady(key); pair != nil && chID == pair.DownlinkChID {
+				rc, added := p.addReverseConn(connID, target, resolved, chID)
+				if added {
+					atomic.StoreInt32(&rc.sendCh, int32(pair.UplinkChID))
+					log.Printf("[客户端] 反向拨号请求: %s (预热 Pair %s 通道 %d/%d), ID:%s", target, pair.ID, pair.DownlinkChID, pair.UplinkChID, protocol.ShortID(connID))
+					go p.dialReverseTarget(rc, connID, target, resolved)
+					return
+				}
+				// 同 connID 已被占用：回退经典路径处理（副本去重）
+			}
+		}
+	}
+
 	rc, ok := p.addReverseConn(connID, target, resolved, chID)
 	if !ok {
 		// 已有连接占用
 		return
 	}
 
-	// 广播 MsgSelectUplink（仅广播竞争路径；预热 Pair 消费路径见 handleReverseServerMsg）
+	// 经典路径：广播 MsgSelectUplink（无预热表项 / 表项不匹配时回退到竞争选路）
 	upBytes := make([]byte, 4)
 	binary.BigEndian.PutUint32(upBytes, uint32(chID))
 	_ = p.broadcastWrite(websocket.BinaryMessage, protocol.EncodeMessage(protocol.MsgSelectUplink, connID, upBytes, nil))
@@ -130,8 +144,8 @@ func (p *clientPool) handleReverseTCPConnect(chID int, connID string, meta []byt
 	go p.dialReverseTarget(rc, connID, target, resolved)
 }
 
-// dialReverseTarget 异步拨号 + 读泵（广播竞争路径与预热 Pair 提升路径共用）。
-// 数据发送通道取 rc.sendCh（预热路径在预热期已定；广播路径由 MsgSelectDownlink 确定）。
+// dialReverseTarget 异步拨号 + 读泵（经典路径与预热热路径共用）。
+// 数据发送通道取 rc.sendCh（热路径在预热期已定；经典路径由 MsgSelectDownlink 确定）。
 func (p *clientPool) dialReverseTarget(rc *reverseConn, connID, target, resolved string) {
 	conn, err := net.DialTimeout("tcp", resolved, p.config.ConnectTimeout)
 	if err != nil {
@@ -192,7 +206,7 @@ func (p *clientPool) handleReverseServerMsg(chID int, mtype protocol.MessageType
 		}
 		if len(meta) >= 4 {
 			newSend := int(binary.BigEndian.Uint32(meta[0:4]))
-			// CAS from 0
+			// CAS from 0：经典路径首次确定发送通道，重复帧幂等
 			for {
 				cur := atomic.LoadInt32(&rc.sendCh)
 				if cur != 0 {
@@ -202,27 +216,7 @@ func (p *clientPool) handleReverseServerMsg(chID int, mtype protocol.MessageType
 					break
 				}
 			}
-			// warm 预绑定状态：预热期选路至此全部完成（客户端已同时持有 P1/P2），
-			// 保留状态等待 MsgTCPConnect 提升（TTL 兜底清理防泄漏）
 		}
-	case protocol.MsgTCPConnect:
-		// 预热 Pair 消费：服务端复用 prebind connID 单播拨号请求。
-		// 收发通道在预热期已协商完毕，直接提升为真实连接，零选路消息。
-		if rc.recvCh != chID || len(meta) < 1 {
-			return
-		}
-		if !atomic.CompareAndSwapInt32(&rc.prebind, 1, 0) {
-			return // 已提升或非 warm 状态
-		}
-		target := string(meta[1:])
-		resolved := target
-		if p.config.IPStrategy != protocol.IPStrategyDefault {
-			resolved = protocol.ResolveWithStrategy(target, p.config.IPStrategy)
-		}
-		rc.target = target
-		rc.resolved = resolved
-		log.Printf("[客户端] 反向拨号请求: %s (预热 Pair 通道 %d), ID:%s", target, chID, protocol.ShortID(connID))
-		go p.dialReverseTarget(rc, connID, target, resolved)
 	case protocol.MsgTCPData:
 		if rc.recvCh != chID {
 			return
@@ -247,12 +241,6 @@ func (p *clientPool) handleReverseServerMsg(chID int, mtype protocol.MessageType
 func (p *clientPool) reverseOnChannelReady(chID int) {
 	if !p.config.EnableReverse {
 		return
-	}
-	// 反向预热开关由客户端 -hotpair 决定（镜像正向由客户端 PairWarmer 决定）：
-	// 通道就绪时通知服务端为本客户端启用反向 Pair 预热，服务端零配置。
-	if p.config.EnableHotPair {
-		_ = p.asyncWriteDirect(chID, websocket.BinaryMessage,
-			protocol.EncodeMessage(protocol.MsgReverseHotPair, "", nil, nil))
 	}
 	if len(p.config.ReverseListeners) == 0 {
 		return
@@ -351,41 +339,6 @@ func (p *clientPool) handleReverseListenResult(connID string, meta []byte) {
 		log.Printf("[客户端] 反向监听注册失败: %s: %s", spec, reason)
 	}
 }
-
-// handleReversePrebind 处理服务端反向预绑定请求（-hotpair 预热路径）。
-// 首达占用 → 广播 MsgSelectUplink([首达通道]) → 不拨号；服务端竞争出 P2 完成 Pair
-// 后经 P1 回 MsgSelectDownlink([P2])，客户端补全 sendCh 并保留 warm 状态——
-// 上下行选路在预热期全部完成，拨号期仅消费（见 handleReverseServerMsg 的 MsgTCPConnect 分支）。
-func (p *clientPool) handleReversePrebind(chID int, connID string, meta []byte) {
-	if !p.config.EnableReverse {
-		return
-	}
-	if len(meta) < 1 {
-		return
-	}
-	// 仅处理预绑定目标（与正向 PrebindTarget 一致）
-	if string(meta[1:]) != protocol.PrebindTarget {
-		return
-	}
-	rc, ok := p.addReverseConn(connID, protocol.PrebindTarget, protocol.PrebindTarget, chID)
-	if !ok {
-		// 已有通道占用（广播副本），忽略
-		return
-	}
-	atomic.StoreInt32(&rc.prebind, 1)
-	upBytes := make([]byte, 4)
-	binary.BigEndian.PutUint32(upBytes, uint32(chID))
-	_ = p.broadcastWrite(websocket.BinaryMessage, protocol.EncodeMessage(protocol.MsgSelectUplink, connID, upBytes, nil))
-	// 兑底：若 warm 状态一直未被 MsgTCPConnect 消费（服务端 Pair 未被使用/旧版服务端），定时清理防泄漏
-	time.AfterFunc(reversePrebindTTL, func() {
-		if cur := p.getReverseConn(connID); cur != nil && atomic.LoadInt32(&cur.prebind) == 1 {
-			p.removeReverseConn(connID)
-		}
-	})
-}
-
-// reversePrebindTTL 反向预绑定状态的兜底存活期（预热刷新间隔 30s 的零头）
-const reversePrebindTTL = 5 * time.Second
 
 // checkReverseRegFatal 检查启动阶段反向监听是否全部注册失败
 func (p *clientPool) checkReverseRegFatal() {
