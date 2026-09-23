@@ -15,8 +15,12 @@ x-tunnel 多通道 WebSocket 隧道的 **Go 客户端核心库**（module `githu
   - `streamDialer()`：TCP 流拨号（注册 → MsgTCPConnect（Hot Pair/广播）→ 等待建立 → 内存管道）
   - `udpDialer()`：UDP 通道拨号（UDP ASSOCIATE 语义、端口黑名单、IPStrategy 过滤、懒启动竞速）
   - `ParseSocks5Auth`/`AuthEqual`：本地代理监听地址与鉴权工具
+- **反向模式**（`reverse.go`）：服务端按客户端传入的监听值开监听，流量由客户端出网
+  （`cfg.EnableReverse` + `cfg.ReverseListeners`，客户端处理服务端 `MsgTCPConnect` 拨号目标；
+  支持服务端主动拨号单播直达）
 - **中继节点管理**（`relay.go`）：节点评分、加权负载均衡（负载因子降权）、测速循环、健康检查
-- **Hot Pair 预热**（`pair_warmer.go`）：成对通道预建，降低首包延迟
+- **Hot Pair 双端热表**（`pair_warmer.go`）：客户端预热通道对并经 `MsgHotPairNotify` 批量通知
+  服务端建表；拨号期零选路消息（connID = 预热键.唯一后缀），Pair 共享复用，正反双模式通用
 - **ECH/DoH 共享栈**（`ech_bridge.go`）：复用 [`xshared`](https://github.com/v2up-32mb/xshared) 的
   `ech`/`dns`/`config`（DoH 多服务器 fallback → UDP DNS → 标准 TLS 降级）
 
@@ -32,6 +36,13 @@ p, err := xtunnel.NewClientPool(cfg, ctx, cancel)
 // ... Start 后通过适配器接入 xshared SOCKS5/HTTP 代理服务器：
 // client := xtunnel.NewClient(p)  // 或直接经 clientPool 适配器
 // client.StreamDialer() / client.UDPDialer()
+```
+
+反向模式（`-l` 值改为由服务端开监听，流量由客户端出网）：
+
+```go
+cfg.EnableReverse = true
+cfg.ReverseListeners = []string{"socks5://user:pass@0.0.0.0:30000"} // 绑定地址由服务端解释
 ```
 
 完整接入示例见 `xtunnel-cli`（CLI 壳仓库）与 `x-client/golib`（gomobile 入口）。
