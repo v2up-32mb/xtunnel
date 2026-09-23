@@ -1346,6 +1346,10 @@ func (p *clientPool) handleChannel(chID int, conn *websocket.Conn) {
 		case protocol.MsgTCPConnect:
 			p.handleReverseTCPConnect(chID, connID, meta)
 			continue
+		case protocol.MsgPrebindRequest:
+			// 反向模式：服务端预热器请求客户端预绑定（镜像正向服务端 handlePrebindRequest）
+			p.handleReversePrebind(chID, connID, meta)
+			continue
 		case protocol.MsgReverseListenResult:
 			p.handleReverseListenResult(connID, meta)
 			continue

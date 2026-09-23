@@ -21,6 +21,7 @@ type reverseConn struct {
 	resolved  string
 	recvCh    int
 	sendCh    int32 // atomic
+	prebind   bool // 预绑定状态：仅参与选路，不拨号不泵数据，选路完成后即清理
 	connMu    sync.Mutex
 	conn      net.Conn
 	closeOnce sync.Once
@@ -196,6 +197,10 @@ func (p *clientPool) handleReverseServerMsg(chID int, mtype protocol.MessageType
 					break
 				}
 			}
+			// 预绑定状态：选路完成即清理（镜像正向 handlePrebindRequest 的立即注销），不拨号不泵数据
+			if rc.prebind {
+				p.removeReverseConn(connID)
+			}
 		}
 	case protocol.MsgTCPData:
 		if rc.recvCh != chID {
@@ -317,7 +322,41 @@ func (p *clientPool) handleReverseListenResult(connID string, meta []byte) {
 	}
 }
 
-// 检查启动阶段全败
+// handleReversePrebind 处理服务端反向预绑定请求（-hotpair 预热路径）。
+// 镜像正向 handlePrebindRequest：首达占用 → 广播 MsgSelectUplink([首达通道]) →
+// 不拨号；服务端收到后以 meta 为 P1、首达通道为 P2 完成 Pair 构建。
+func (p *clientPool) handleReversePrebind(chID int, connID string, meta []byte) {
+	if !p.config.EnableReverse {
+		return
+	}
+	if len(meta) < 1 {
+		return
+	}
+	// 仅处理预绑定目标（与正向 PrebindTarget 一致）
+	if string(meta[1:]) != protocol.PrebindTarget {
+		return
+	}
+	rc, ok := p.addReverseConn(connID, protocol.PrebindTarget, protocol.PrebindTarget, chID)
+	if !ok {
+		// 已有通道占用（广播副本），忽略
+		return
+	}
+	rc.prebind = true
+	upBytes := make([]byte, 4)
+	binary.BigEndian.PutUint32(upBytes, uint32(chID))
+	_ = p.broadcastWrite(websocket.BinaryMessage, protocol.EncodeMessage(protocol.MsgSelectUplink, connID, upBytes, nil))
+	// 兑底：若服务端一直不回 MsgSelectDownlink（如旧版服务端），定时清理防泄漏
+	time.AfterFunc(reversePrebindTTL, func() {
+		if cur := p.getReverseConn(connID); cur != nil && cur.prebind {
+			p.removeReverseConn(connID)
+		}
+	})
+}
+
+// reversePrebindTTL 反向预绑定状态的兜底存活期（预热刷新间隔 30s 的零头）
+const reversePrebindTTL = 5 * time.Second
+
+// checkReverseRegFatal 检查启动阶段反向监听是否全部注册失败
 func (p *clientPool) checkReverseRegFatal() {
 	p.revMu.Lock()
 	anyOK := false
