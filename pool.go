@@ -77,6 +77,13 @@ type clientPool struct {
 	mu    sync.RWMutex
 	conns map[string]*clientConnState
 
+	// 反向通道
+	revMu                sync.RWMutex
+	reverseConns         map[string]*reverseConn
+	reverseListenerMap   map[string]string // spec -> listenerID
+	reverseListenerState map[string]*reverseListenerState
+	reverseRegOnceDone   bool
+
 	relayCount int
 	socks5Sem  chan struct{} // SOCKS5 连接信号量
 
@@ -106,23 +113,26 @@ func newClientPool(cfg *Config, ctx context.Context, cancel context.CancelFunc) 
 		limit = DefaultBackpressureLimitBytes // 默认 8MB
 	}
 	p := &clientPool{
-		config:            cfg,
-		ctx:               ctx,
-		cancel:            cancel,
-		clientID:          cfg.ClientID,
-		echManager:        newSharedEchManager(cfg),
-		relayManager:      NewRelayNodeManager(),
-		wsConns:           make([]*websocket.Conn, cfg.Connections),
-		writeQueues:       make([]chan writeJob, cfg.Connections),
-		connsWriteMutex:   make([]sync.Mutex, cfg.Connections),
-		conns:             make(map[string]*clientConnState),
-		globalQueueLimit:  limit,
-		nextChannel:       1,
-		backpressureState: int32(protocol.BackpressureNormal),
-		resumeCh:          make(chan struct{}, 1),
-		chReadyCh:         make(chan int, 64),
-		reconnectCh:       make(chan struct{}, 1),
-		chInvalidCh:       make(chan int, 64),
+		config:             cfg,
+		ctx:                ctx,
+		cancel:             cancel,
+		clientID:           cfg.ClientID,
+		echManager:         newSharedEchManager(cfg),
+		relayManager:       NewRelayNodeManager(),
+		wsConns:            make([]*websocket.Conn, cfg.Connections),
+		writeQueues:        make([]chan writeJob, cfg.Connections),
+		connsWriteMutex:    make([]sync.Mutex, cfg.Connections),
+		conns:              make(map[string]*clientConnState),
+		reverseConns:       make(map[string]*reverseConn),
+		reverseListenerMap: make(map[string]string),
+		reverseListenerState: make(map[string]*reverseListenerState),
+		globalQueueLimit:   limit,
+		nextChannel:        1,
+		backpressureState:  int32(protocol.BackpressureNormal),
+		resumeCh:           make(chan struct{}, 1),
+		chReadyCh:          make(chan int, 64),
+		reconnectCh:        make(chan struct{}, 1),
+		chInvalidCh:        make(chan int, 64),
 	}
 
 	if cfg.EnableHotPair {
@@ -552,6 +562,8 @@ func (p *clientPool) dialAndServe(idx int, ip string) {
 		case p.chReadyCh <- chID:
 		default:
 		}
+
+		p.reverseOnChannelReady(chID)
 
 		p.handleChannel(chID, wsConn)
 
@@ -1257,6 +1269,7 @@ func (p *clientPool) availableChannels() []int {
 
 // cleanupChannel 清理通道
 func (p *clientPool) cleanupChannel(chID int) {
+	p.reverseCleanupChannel(chID)
 	p.mu.Lock()
 	var toClose []string
 	for id, st := range p.conns {
@@ -1323,7 +1336,19 @@ func (p *clientPool) handleChannel(chID int, conn *websocket.Conn) {
 
 		p.noteLastChannel(connID, chID)
 
+		// Reverse mode: 已注册的反向连接优先派发,避免与正向逻辑冲突
+		if p.hasReverseConn(connID) {
+			p.handleReverseServerMsg(chID, mtype, connID, meta, payload)
+			continue
+		}
+
 		switch mtype {
+		case protocol.MsgTCPConnect:
+			p.handleReverseTCPConnect(chID, connID, meta)
+			continue
+		case protocol.MsgReverseListenResult:
+			p.handleReverseListenResult(connID, meta)
+			continue
 		case protocol.MsgSelectUplink:
 			// 从 meta 中解析服务端选择的上行通道ID
 			var uplinkChID int
