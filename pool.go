@@ -925,59 +925,13 @@ func (p *clientPool) GetUplinkChannel(connID string) (int, bool) {
 	return st.uplink, true
 }
 
-// RegisterAndBroadcastTCP 注册 TCP 连接并广播连接请求。
-// 返回实际生效的 connID：Hot Pair 路径复用预绑定 connID 作为关联凭证
-// （服务端凭它把 warm 状态提升为真实连接，拨号期零选路消息）；
-// 广播回退路径使用调用方传入的 requestID。
-func (p *clientPool) RegisterAndBroadcastTCP(requestID, target string, first []byte, tcpConn net.Conn, reqType string) string {
-	meta := make([]byte, 1+len(target))
-	meta[0] = byte(p.config.IPStrategy)
-	copy(meta[1:], target)
-
-	// Hot Pair 路径：预热 Pair 就绪则复用 prebind connID 单播直达，免广播竞争
-	if p.config.EnableHotPair && p.pairWarmer != nil {
-		if pair := p.pairWarmer.AcquirePrimary(); pair != nil && pair.prebindConnID != "" {
-			connID := pair.prebindConnID
-			p.mu.Lock()
-			st := &clientConnState{}
-			p.conns[connID] = st
-			st.tcpConn = tcpConn
-			st.target = target
-			st.connected = make(chan bool, 1)
-			st.start = time.Now()
-			if reqType != "" {
-				st.reqType = reqType
-			}
-			if tcpConn != nil {
-				if ra := tcpConn.RemoteAddr(); ra != nil {
-					st.clientAddr = ra.String()
-				}
-			}
-			st.pair = pair
-			// 收发通道预热期已协商完毕，直接预置，免等 MsgSelectUplink/竞争
-			st.uplink = pair.UplinkChID
-			atomic.StoreInt32(&st.downlink, int32(pair.DownlinkChID))
-			p.mu.Unlock()
-
-			msg := protocol.EncodeMessage(protocol.MsgTCPConnect, connID, meta, first)
-			log.Printf("[客户端] %s 使用 Hot Pair %s (TX %d RX %d) 发送首包，ID:%s", reqType, pair.ID, pair.UplinkChID, pair.DownlinkChID, protocol.ShortID(connID))
-			if err := p.asyncWriteDirect(pair.UplinkChID, websocket.BinaryMessage, msg); err == nil {
-				return connID
-			}
-			// Hot Pair 上行通道发送失败：注销连接状态、释放 Pair 并回退到广播
-			log.Printf("[客户端] %s Hot Pair 上行通道 %d 发送失败，回退广播，ID:%s", reqType, pair.UplinkChID, protocol.ShortID(connID))
-			p.Unregister(connID)
-			p.pairWarmer.ReleasePair(pair)
-			p.pairWarmer.InvalidateChannel(pair.UplinkChID)
-			// 继续走广播路径
-		}
-	}
-
+// RegisterAndBroadcastTCP 注册 TCP 连接并广播连接请求
+func (p *clientPool) RegisterAndBroadcastTCP(connID, target string, first []byte, tcpConn net.Conn, reqType string) {
 	p.mu.Lock()
-	st := p.conns[requestID]
+	st := p.conns[connID]
 	if st == nil {
 		st = &clientConnState{}
-		p.conns[requestID] = st
+		p.conns[connID] = st
 	}
 	st.tcpConn = tcpConn
 	st.target = target
@@ -997,13 +951,44 @@ func (p *clientPool) RegisterAndBroadcastTCP(requestID, target string, first []b
 	st.closed = false
 	p.mu.Unlock()
 
-	msg := protocol.EncodeMessage(protocol.MsgTCPConnect, requestID, meta, first)
+	meta := make([]byte, 1+len(target))
+	meta[0] = byte(p.config.IPStrategy)
+	copy(meta[1:], target)
+
+	// Hot Pair 路径：尝试获取主 Pair 并直接发送
+	if p.config.EnableHotPair && p.pairWarmer != nil {
+		pair := p.pairWarmer.AcquirePrimary()
+		if pair != nil {
+			p.mu.Lock()
+			st = p.conns[connID]
+			if st != nil {
+				st.pair = pair
+			}
+			p.mu.Unlock()
+			msg := protocol.EncodeMessage(protocol.MsgTCPConnect, connID, meta, first)
+			log.Printf("[客户端] %s 使用 Hot Pair %s (TX %d RX %d) 发送首包，ID:%s", reqType, pair.ID, pair.UplinkChID, pair.DownlinkChID, protocol.ShortID(connID))
+			if err := p.asyncWriteDirect(pair.UplinkChID, websocket.BinaryMessage, msg); err == nil {
+				return
+			}
+			// Hot Pair 上行通道发送失败：释放 Pair 并回退到广播，避免连接状态残留
+			log.Printf("[客户端] %s Hot Pair 上行通道 %d 发送失败，回退广播，ID:%s", reqType, pair.UplinkChID, protocol.ShortID(connID))
+			p.mu.Lock()
+			if st = p.conns[connID]; st != nil {
+				st.pair = nil
+			}
+			p.mu.Unlock()
+			p.pairWarmer.ReleasePair(pair)
+			p.pairWarmer.InvalidateChannel(pair.UplinkChID)
+			// 继续走广播路径
+		}
+	}
+
+	msg := protocol.EncodeMessage(protocol.MsgTCPConnect, connID, meta, first)
 	sent := p.broadcastWrite(websocket.BinaryMessage, msg)
 	if sent == 0 {
-		log.Printf("[客户端] %s 广播 TCP 连接请求失败，无可用通道，ID:%s", reqType, protocol.ShortID(requestID))
-		p.Unregister(requestID)
+		log.Printf("[客户端] %s 广播 TCP 连接请求失败，无可用通道，ID:%s", reqType, protocol.ShortID(connID))
+		p.Unregister(connID)
 	}
-	return requestID
 }
 
 // RegisterUDP 注册 UDP 连接

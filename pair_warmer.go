@@ -21,9 +21,7 @@ const (
 
 // HotChannelPair 表示一个热通道对
 type HotChannelPair struct {
-	ID            string // 槽位号（"01".."08"，同一组 Pair 稳定复用，仅用于日志/刷新继承）
-	prebindConnID string // 预绑定 connID（每次构建唯一）；拨号期复用它作为关联凭证，
-	// 服务端凭它把 warm 状态提升为真实连接，拨号期零选路消息
+	ID           string
 	UplinkChID   int
 	DownlinkChID int
 	state        int32
@@ -208,15 +206,6 @@ func (w *PairWarmer) SetPrimaryForTest(pair *HotChannelPair) {
 	w.mu.Unlock()
 }
 
-// AddPairForTest 注册 Pair 到池中并设为 primary（测试用；
-// SetPrimaryForTest 不入 pairs 列表，InvalidateChannel 扫描不到）
-func (w *PairWarmer) AddPairForTest(pair *HotChannelPair) {
-	w.mu.Lock()
-	w.pairs = append(w.pairs, pair)
-	w.primary = pair
-	w.mu.Unlock()
-}
-
 // PairCountForTest 仅用于测试返回 Pair 数量
 func (w *PairWarmer) PairCountForTest() int {
 	w.mu.RLock()
@@ -315,11 +304,10 @@ func (w *PairWarmer) BuildPair(available []int) (*HotChannelPair, error) {
 					return nil, fmt.Errorf("PairWarmer 已关闭")
 				}
 				pair := &HotChannelPair{
-					prebindConnID: connID,
-					UplinkChID:    res.uplinkChID,
-					DownlinkChID:  res.downlinkChID,
-					state:         int32(PairStateReady),
-					createdAt:     time.Now(),
+					UplinkChID:   res.uplinkChID,
+					DownlinkChID: res.downlinkChID,
+					state:        int32(PairStateReady),
+					createdAt:    time.Now(),
 				}
 				w.mu.Lock()
 				w.pairs = append(w.pairs, pair)

@@ -66,10 +66,9 @@ type poolStreamDialer struct{ pool *clientPool }
 // 返回的 net.Conn 下行由池写入内存管道，上行经 SendDataDirect/广播。
 func (d *poolStreamDialer) DialStream(ctx context.Context, target string) (net.Conn, error) {
 	p := d.pool
-	requestID := uuid.NewString()
+	connID := uuid.NewString()
 	sink, source := newBufferedPipe()
-	// Hot Pair 路径会复用 prebind connID，后续数据面必须使用返回的实际 connID
-	connID := p.RegisterAndBroadcastTCP(requestID, target, nil, sink, "SOCKS5")
+	p.RegisterAndBroadcastTCP(connID, target, nil, sink, "SOCKS5")
 
 	p.mu.RLock()
 	st := p.conns[connID]
