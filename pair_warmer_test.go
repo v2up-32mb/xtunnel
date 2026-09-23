@@ -2,8 +2,11 @@ package xtunnel
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/v2up-32mb/xtunnel/protocol"
 )
 
 func newTestClientPool(cfg *Config) *clientPool {
@@ -541,5 +544,134 @@ func TestPairWarmerReleasePairReElectsPrimary(t *testing.T) {
 	w.mu.RUnlock()
 	if prim != backup {
 		t.Fatal("expected backup re-elected as primary after release")
+	}
+}
+
+// TestRegisterHotPairReusesPrebindConnID Hot Pair 拨号复用 prebind connID：
+// 服务端凭它提升 warm 状态（拨号期零选路消息），客户端预置收发通道。
+func TestRegisterHotPairReusesPrebindConnID(t *testing.T) {
+	clientConn, serverConn, cleanup := newClientTestWebSocketPair(t)
+	defer cleanup()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cfg := DefaultConfig()
+	cfg.EnableHotPair = true
+	cfg.Connections = 1
+	cfg.ConnectTimeout = 2 * time.Second
+	p, err := newClientPool(cfg, ctx, cancel)
+	if err != nil {
+		t.Fatalf("newClientPool: %v", err)
+	}
+	p.wsConns[0] = clientConn
+	go p.writeWorker(0, clientConn, p.writeQueues[0])
+	t.Cleanup(func() { _ = clientConn.Close() })
+
+	// 构造就绪 Pair（预热期等价状态：上下行已协商完毕）
+	pair := &HotChannelPair{
+		ID:            "01",
+		prebindConnID: "prebind-reuse-test",
+		UplinkChID:    1,
+		DownlinkChID:  1,
+		state:         int32(PairStateReady),
+	}
+	p.pairWarmer.SetPrimaryForTest(pair)
+
+	done := make(chan struct{})
+	go func() {
+		p.handleChannel(1, clientConn)
+		close(done)
+	}()
+
+	got := p.RegisterAndBroadcastTCP("request-uuid-1", "example.test:443", nil, nil, "TEST")
+	if got != "prebind-reuse-test" {
+		t.Fatalf("expected prebind connID reuse, got %q", got)
+	}
+
+	// 服务端收到 MsgTCPConnect，connID 即 prebind connID
+	_ = serverConn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	_, raw, err := serverConn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read MsgTCPConnect: %v", err)
+	}
+	mtype, connID, _, _, err := protocol.DecodeMessage(raw)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if mtype != protocol.MsgTCPConnect || connID != "prebind-reuse-test" {
+		t.Fatalf("expected MsgTCPConnect with prebind connID, got type=%d id=%s", mtype, connID)
+	}
+
+	// 客户端 st 已预置收发通道（免等 MsgSelectUplink/竞争）
+	p.mu.RLock()
+	st := p.conns["prebind-reuse-test"]
+	uplink, downlink := 0, int32(0)
+	if st != nil {
+		uplink = st.uplink
+		downlink = atomic.LoadInt32(&st.downlink)
+	}
+	p.mu.RUnlock()
+	if uplink != 1 || downlink != 1 {
+		t.Fatalf("st channels not preset: uplink=%d downlink=%d", uplink, downlink)
+	}
+}
+
+// TestRegisterHotPairUnicastFailsFallsBack Hot Pair 上行通道失效 → 注销预置状态，
+// 回退广播路径并使用 requestID
+func TestRegisterHotPairUnicastFailsFallsBack(t *testing.T) {
+	clientConn, serverConn, cleanup := newClientTestWebSocketPair(t)
+	defer cleanup()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cfg := DefaultConfig()
+	cfg.EnableHotPair = true
+	cfg.Connections = 1
+	p, err := newClientPool(cfg, ctx, cancel)
+	if err != nil {
+		t.Fatalf("newClientPool: %v", err)
+	}
+	p.wsConns[0] = clientConn
+	go p.writeWorker(0, clientConn, p.writeQueues[0])
+	t.Cleanup(func() { _ = clientConn.Close() })
+
+	// Pair 的上行通道指向不存在的通道 9 → 单播必失败
+	pair := &HotChannelPair{
+		ID:            "01",
+		prebindConnID: "prebind-fallback-test",
+		UplinkChID:    9,
+		DownlinkChID:  1,
+		state:         int32(PairStateReady),
+	}
+	p.pairWarmer.AddPairForTest(pair)
+
+	got := p.RegisterAndBroadcastTCP("request-uuid-2", "example.test:443", nil, nil, "TEST")
+	if got != "request-uuid-2" {
+		t.Fatalf("expected fallback to requestID, got %q", got)
+	}
+
+	// 广播帧使用 requestID
+	_ = serverConn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	_, raw, err := serverConn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read broadcast: %v", err)
+	}
+	mtype, connID, _, _, err := protocol.DecodeMessage(raw)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if mtype != protocol.MsgTCPConnect || connID != "request-uuid-2" {
+		t.Fatalf("expected broadcast MsgTCPConnect with requestID, got type=%d id=%s", mtype, connID)
+	}
+
+	// 预置状态已注销，Pair 已废弃
+	p.mu.RLock()
+	_, exists := p.conns["prebind-fallback-test"]
+	p.mu.RUnlock()
+	if exists {
+		t.Fatal("preset state should be unregistered after unicast failure")
+	}
+	if acquired := p.pairWarmer.AcquirePrimary(); acquired != nil {
+		t.Fatal("pair should be invalidated after unicast failure")
 	}
 }
