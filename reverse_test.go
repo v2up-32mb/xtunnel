@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"net"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -324,6 +325,58 @@ func TestReverseListenAllFailTriggersCallback(t *testing.T) {
 	case err := <-errCh:
 		if err == nil {
 			t.Fatal("expected non-nil error")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("OnReverseError not called")
+	}
+}
+
+// TestReverseListenNoResponseHintMessage 无回执场景：报错应提示服务端可能不支持反向模式
+func TestReverseListenNoResponseHintMessage(t *testing.T) {
+	clientConn, _, cleanup := newClientTestWebSocketPair(t)
+	defer cleanup()
+
+	cfg := DefaultConfig()
+	cfg.EnableReverse = true
+	cfg.Connections = 1
+	errCh := make(chan error, 1)
+	cfg.OnReverseError = func(err error) { errCh <- err }
+	p := newReverseTestPool(t, cfg, clientConn)
+
+	// 仅发送注册（getOrCreateListenerID 填充状态），模拟旧服务端永不回执
+	p.getOrCreateListenerID("socks5://127.0.0.1:30000")
+	p.checkReverseRegFatal()
+
+	select {
+	case err := <-errCh:
+		if !strings.Contains(err.Error(), "不支持反向模式") {
+			t.Fatalf("expected hint about unsupported server, got: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("OnReverseError not called")
+	}
+}
+
+// TestReverseListenERRNoReason ERR 回执但无原因文本：不应误报“不支持反向模式”
+func TestReverseListenERRNoReason(t *testing.T) {
+	clientConn, _, cleanup := newClientTestWebSocketPair(t)
+	defer cleanup()
+
+	cfg := DefaultConfig()
+	cfg.EnableReverse = true
+	cfg.Connections = 1
+	errCh := make(chan error, 1)
+	cfg.OnReverseError = func(err error) { errCh <- err }
+	p := newReverseTestPool(t, cfg, clientConn)
+
+	id := p.getOrCreateListenerID("socks5://127.0.0.1:30000")
+	p.handleReverseListenResult(id, []byte{byte(protocol.StatusERR)})
+	p.checkReverseRegFatal()
+
+	select {
+	case err := <-errCh:
+		if strings.Contains(err.Error(), "不支持反向模式") {
+			t.Fatalf("ERR received: should not hint unsupported server, got: %v", err)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("OnReverseError not called")

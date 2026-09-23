@@ -44,6 +44,7 @@ type reverseListenerState struct {
 	listenerID string
 	ok         bool
 	reason     string
+	responded  bool // 服务端是否回过任意 MsgReverseListenResult（区分“无回执”与“回执无原因”）
 }
 
 func (p *clientPool) hasReverseConn(connID string) bool {
@@ -327,6 +328,7 @@ func (p *clientPool) handleReverseListenResult(connID string, meta []byte) {
 	}
 	state.ok = status == protocol.StatusOK
 	state.reason = reason
+	state.responded = true
 	p.revMu.Unlock()
 
 	spec := ""
@@ -352,8 +354,11 @@ func (p *clientPool) checkReverseRegFatal() {
 		}
 		if st.reason != "" {
 			failures = append(failures, st.spec+": "+st.reason)
+		} else if !st.responded {
+			// 从未收到任何回执：大概率对端不认识 MsgReverseListen（旧版服务端）
+			failures = append(failures, st.spec+": 无响应（服务端可能不支持反向模式或版本过旧）")
 		} else {
-			failures = append(failures, st.spec+": unknown")
+			failures = append(failures, st.spec+": 服务端未给出失败原因")
 		}
 	}
 	p.revMu.Unlock()
