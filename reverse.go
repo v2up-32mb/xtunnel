@@ -10,25 +10,40 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/gorilla/websocket"
 	"github.com/google/uuid"
+	"github.com/gorilla/websocket"
 	"github.com/v2up-32mb/xtunnel/protocol"
 )
 
 type reverseConn struct {
-	id       string
-	target   string
-	recvCh   int
-	sendCh   int32 // atomic
-	conn     net.Conn
+	id        string
+	target    string
+	resolved  string
+	recvCh    int
+	sendCh    int32 // atomic
+	connMu    sync.Mutex
+	conn      net.Conn
 	closeOnce sync.Once
 }
 
+func (rc *reverseConn) setConn(c net.Conn) {
+	rc.connMu.Lock()
+	rc.conn = c
+	rc.connMu.Unlock()
+}
+
+func (rc *reverseConn) getConn() net.Conn {
+	rc.connMu.Lock()
+	c := rc.conn
+	rc.connMu.Unlock()
+	return c
+}
+
 type reverseListenerState struct {
-	spec   string
+	spec       string
 	listenerID string
-	ok     bool
-	reason string
+	ok         bool
+	reason     string
 }
 
 func (p *clientPool) hasReverseConn(connID string) bool {
@@ -45,18 +60,20 @@ func (p *clientPool) getReverseConn(connID string) *reverseConn {
 	return rc
 }
 
-func (p *clientPool) addReverseConn(connID, target string, recvCh int) (*reverseConn, bool) {
+func (p *clientPool) addReverseConn(connID, target, resolved string, recvCh int) (*reverseConn, bool) {
 	p.revMu.Lock()
-	defer p.revMu.Unlock()
 	if _, exists := p.reverseConns[connID]; exists {
+		p.revMu.Unlock()
 		return nil, false
 	}
 	rc := &reverseConn{
-		id:     connID,
-		target: target,
-		recvCh: recvCh,
+		id:       connID,
+		target:   target,
+		resolved: resolved,
+		recvCh:   recvCh,
 	}
 	p.reverseConns[connID] = rc
+	p.revMu.Unlock()
 	return rc, true
 }
 
@@ -71,8 +88,8 @@ func (p *clientPool) reverseCleanupChannel(chID int) {
 	for id, rc := range p.reverseConns {
 		if rc.recvCh == chID || int(atomic.LoadInt32(&rc.sendCh)) == chID {
 			rc.closeOnce.Do(func() {
-				if rc.conn != nil {
-					rc.conn.Close()
+				if c := rc.getConn(); c != nil {
+					c.Close()
 				}
 			})
 			delete(p.reverseConns, id)
@@ -89,13 +106,13 @@ func (p *clientPool) handleReverseTCPConnect(chID int, connID string, meta []byt
 		return
 	}
 	target := string(meta[1:])
-	// 轻量 IP 策略：客户端端使用自身配置
-	if protocol.IPStrategy(p.config.IPStrategy) != protocol.IPStrategyDefault {
-		// ResolveWithStrategy 只在有 IP 策略时生效; 这里遵循设计：忽略 meta[0]，客户端用自身
-		target = protocol.ResolveWithStrategy(target, p.config.IPStrategy)
+	// 遵循设计：忽略 meta[0] 策略字节，客户端用自身 IPStrategy 解析（解析一次，拨号用 resolved，日志用原目标）
+	resolved := target
+	if p.config.IPStrategy != protocol.IPStrategyDefault {
+		resolved = protocol.ResolveWithStrategy(target, p.config.IPStrategy)
 	}
 
-	rc, ok := p.addReverseConn(connID, target, chID)
+	rc, ok := p.addReverseConn(connID, target, resolved, chID)
 	if !ok {
 		// 已有连接占用
 		return
@@ -109,25 +126,18 @@ func (p *clientPool) handleReverseTCPConnect(chID int, connID string, meta []byt
 
 	// 异步拨号
 	go func() {
-		// 可选：策略已在上一步处理完
-		resolved := target
-		if p.config.IPStrategy != protocol.IPStrategyDefault {
-			resolved = protocol.ResolveWithStrategy(target, p.config.IPStrategy)
-		}
-		conn, err := net.DialTimeout("tcp", resolved, p.config.ConnectTimeout)
+		conn, err := net.DialTimeout("tcp", rc.resolved, p.config.ConnectTimeout)
 		if err != nil {
 			log.Printf("[客户端] 反向拨号失败 %s -> %s: %v", protocol.ShortID(connID), target, err)
 			_ = p.broadcastWrite(websocket.BinaryMessage, protocol.EncodeMessage(protocol.MsgConnStatus, connID, []byte{byte(protocol.StatusERR)}, nil))
 			p.removeReverseConn(connID)
 			return
 		}
-		rc.conn = conn
+		rc.setConn(conn)
 		_ = p.broadcastWrite(websocket.BinaryMessage, protocol.EncodeMessage(protocol.MsgConnStatus, connID, []byte{byte(protocol.StatusOK)}, nil))
-		// 读泵
+		// 读泵：与正向模式服务端 forwardTargetToClient 对齐，不设读超时，避免误杀空闲连接
 		buf := make([]byte, 64*1024)
 		for {
-			// 写超时
-			_ = conn.SetReadDeadline(time.Now().Add(p.config.ReadTimeout))
 			n, err := conn.Read(buf)
 			if err != nil {
 				// 正常的关闭处理
@@ -151,8 +161,8 @@ func (p *clientPool) handleReverseTCPConnect(chID int, connID string, meta []byt
 
 func (p *clientPool) sendReverseClose(rc *reverseConn, connID string) {
 	rc.closeOnce.Do(func() {
-		if rc.conn != nil {
-			rc.conn.Close()
+		if c := rc.getConn(); c != nil {
+			c.Close()
 		}
 	})
 	sendCh := int(atomic.LoadInt32(&rc.sendCh))
@@ -191,12 +201,13 @@ func (p *clientPool) handleReverseServerMsg(chID int, mtype protocol.MessageType
 		if rc.recvCh != chID {
 			return
 		}
-		if rc.conn == nil {
+		c := rc.getConn()
+		if c == nil {
 			return
 		}
-		_ = rc.conn.SetWriteDeadline(time.Now().Add(p.config.WriteTimeout))
-		_, err := rc.conn.Write(payload)
-		_ = rc.conn.SetWriteDeadline(time.Time{})
+		_ = c.SetWriteDeadline(time.Now().Add(p.config.WriteTimeout))
+		_, err := c.Write(payload)
+		_ = c.SetWriteDeadline(time.Time{})
 		if err != nil {
 			// 写入失败,关闭
 			p.sendReverseClose(rc, connID)

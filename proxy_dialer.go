@@ -279,6 +279,10 @@ type bufferedPipe struct {
 	bDone   chan struct{}
 }
 
+// NewBufferedPipe 创建双向缓冲内存管道（每方向 512 块缓冲，Close 双向传播）。
+// 慢读端不会阻塞写端协程，供反向通道等服务端实现复用，避免拖死协议读循环。
+func NewBufferedPipe() (net.Conn, net.Conn) { return newBufferedPipe() }
+
 func newBufferedPipe() (a, b *bufferedConn) {
 	p := &bufferedPipe{
 		aCh:   make(chan []byte, 512),

@@ -16,7 +16,7 @@ func TestReverseConnLifecycle(t *testing.T) {
 		t.Fatalf("newClientPool: %v", err)
 	}
 	// add reverse conn
-	rc, ok := p.addReverseConn("id1", "1.2.3.4:80", 1)
+	rc, ok := p.addReverseConn("id1", "1.2.3.4:80", "1.2.3.4:80", 1)
 	if !ok || rc == nil {
 		t.Fatalf("add failed")
 	}
