@@ -395,3 +395,60 @@ func TestReversePrebind(t *testing.T) {
 		t.Fatal("prebind state should be cleaned after MsgSelectDownlink")
 	}
 }
+
+// TestReverseHotPairSignal 客户端 -hotpair：通道就绪时向服务端发送 MsgReverseHotPair 授权
+func TestReverseHotPairSignal(t *testing.T) {
+	clientConn, serverConn, cleanup := newClientTestWebSocketPair(t)
+	defer cleanup()
+
+	cfg := DefaultConfig()
+	cfg.EnableReverse = true
+	cfg.EnableHotPair = true
+	cfg.Connections = 1
+	p := newReverseTestPool(t, cfg, clientConn)
+
+	p.reverseOnChannelReady(1)
+
+	mtype, gotID, gotMeta, gotPayload := readTestFrame(t, serverConn, 3*time.Second)
+	if mtype != protocol.MsgReverseHotPair {
+		t.Fatalf("expected MsgReverseHotPair, got %d", mtype)
+	}
+	if gotID != "" || len(gotMeta) != 0 || len(gotPayload) != 0 {
+		t.Fatalf("expected empty connID/meta/payload, got id=%q meta=%v payload=%v", gotID, gotMeta, gotPayload)
+	}
+}
+
+// TestReverseHotPairSignalDisabled 未开 -hotpair 时不发送授权
+func TestReverseHotPairSignalDisabled(t *testing.T) {
+	clientConn, serverConn, cleanup := newClientTestWebSocketPair(t)
+	defer cleanup()
+
+	cfg := DefaultConfig()
+	cfg.EnableReverse = true
+	cfg.EnableHotPair = false
+	cfg.Connections = 1
+	p := newReverseTestPool(t, cfg, clientConn)
+
+	p.reverseOnChannelReady(1)
+
+	_ = serverConn.SetReadDeadline(time.Now().Add(400 * time.Millisecond))
+	if _, _, err := serverConn.ReadMessage(); err == nil {
+		t.Fatal("no MsgReverseHotPair expected when hotpair disabled")
+	}
+}
+
+// TestReverseHotPairNoForwardWarmer 反向模式下不创建正向 PairWarmer
+func TestReverseHotPairNoForwardWarmer(t *testing.T) {
+	clientConn, _, cleanup := newClientTestWebSocketPair(t)
+	defer cleanup()
+
+	cfg := DefaultConfig()
+	cfg.EnableReverse = true
+	cfg.EnableHotPair = true
+	cfg.Connections = 1
+	p := newReverseTestPool(t, cfg, clientConn)
+
+	if p.pairWarmer != nil {
+		t.Fatal("forward PairWarmer should not be created in reverse mode")
+	}
+}

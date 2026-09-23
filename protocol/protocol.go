@@ -29,6 +29,7 @@ const (
 	// 语义见 xtunnel-cli 仓 docs/superpowers/specs/2026-09-23-reverse-mode-design.md
 	MsgReverseListen       MessageType = 0x20 // 客户端→服务端：请求服务端开启反向监听，meta=监听参数值原文（如 socks5://user:pass@0.0.0.0:30000），connID=监听器 ID
 	MsgReverseListenResult MessageType = 0x21 // 服务端→客户端：监听注册结果，meta[0]=状态(ConnStatus)，meta[1:]=失败原因文本
+	MsgReverseHotPair      MessageType = 0x22 // 客户端→服务端：为该客户端启用反向 Pair 预热（由客户端 -hotpair 决定），每条通道就绪时发送，meta/payload 为空
 )
 
 // PrebindTarget 预绑定目标标识

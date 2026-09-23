@@ -135,7 +135,8 @@ func newClientPool(cfg *Config, ctx context.Context, cancel context.CancelFunc) 
 		chInvalidCh:          make(chan int, 64),
 	}
 
-	if cfg.EnableHotPair {
+	// 反向模式下客户端不是正向拨号方，正向 PairWarmer 无意义，避免空转预绑定
+	if cfg.EnableHotPair && !cfg.EnableReverse {
 		p.pairWarmer = NewPairWarmer(p, cfg)
 	}
 

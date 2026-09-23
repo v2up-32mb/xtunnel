@@ -21,7 +21,7 @@ type reverseConn struct {
 	resolved  string
 	recvCh    int
 	sendCh    int32 // atomic
-	prebind   bool // 预绑定状态：仅参与选路，不拨号不泵数据，选路完成后即清理
+	prebind   bool  // 预绑定状态：仅参与选路，不拨号不泵数据，选路完成后即清理
 	connMu    sync.Mutex
 	conn      net.Conn
 	closeOnce sync.Once
@@ -224,7 +224,16 @@ func (p *clientPool) handleReverseServerMsg(chID int, mtype protocol.MessageType
 
 // 反向监听注册
 func (p *clientPool) reverseOnChannelReady(chID int) {
-	if !p.config.EnableReverse || len(p.config.ReverseListeners) == 0 {
+	if !p.config.EnableReverse {
+		return
+	}
+	// 反向预热开关由客户端 -hotpair 决定（镜像正向由客户端 PairWarmer 决定）：
+	// 通道就绪时通知服务端为本客户端启用反向 Pair 预热，服务端零配置。
+	if p.config.EnableHotPair {
+		_ = p.asyncWriteDirect(chID, websocket.BinaryMessage,
+			protocol.EncodeMessage(protocol.MsgReverseHotPair, "", nil, nil))
+	}
+	if len(p.config.ReverseListeners) == 0 {
 		return
 	}
 	// 确保反向状态已初始化
