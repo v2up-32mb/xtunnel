@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
-	"log"
 	"math/rand"
 	"net"
 	"strings"
@@ -53,6 +52,12 @@ type clientConnState struct {
 	pair       *HotChannelPair
 }
 
+// prebindRacer 预绑定竞速收帧统计（诊断用）
+type prebindRacer struct {
+	chs    []int // 该预绑定收到 MsgSelectUplink 的通道（去重）
+	logged bool  // 是否已输出汇总日志
+}
+
 // clientPool 客户端连接池
 type clientPool struct {
 	globalQueueBytes int64
@@ -76,6 +81,10 @@ type clientPool struct {
 
 	mu    sync.RWMutex
 	conns map[string]*clientConnState
+
+	// [诊断] 预绑定竞速收帧统计：connID → 收到其 MsgSelectUplink 的通道列表（按通道去重）。
+	// 计数挂在池级 map（不随预绑定状态删除），收帧窗口 3s 后汇总打印一次并从 map 清理（防无界增长）。
+	prebindRacers map[string]*prebindRacer
 
 	// 反向通道
 	revMu                sync.RWMutex
@@ -167,7 +176,7 @@ func (p *clientPool) Start(relayNodes []string) {
 	// 添加中转节点
 	for _, addr := range relayNodes {
 		if err := p.relayManager.AddNode(addr, "443"); err != nil {
-			log.Printf("[客户端] 添加中转节点失败: %v", err)
+			coreLogf("[客户端] 添加中转节点失败: %v", err)
 		}
 	}
 	p.relayManager.Start()
@@ -177,18 +186,18 @@ func (p *clientPool) Start(relayNodes []string) {
 
 	if p.relayCount > 0 {
 		// 初始化时按约定申请指定个数的中转节点
-		log.Printf("[客户端] 初始化:按约定申请 %d 个中转节点", p.relayCount)
+		coreLogf("[客户端] 初始化:按约定申请 %d 个中转节点", p.relayCount)
 		bestNodes := p.relayManager.SelectBestNodes(p.relayCount)
 
 		if len(bestNodes) > 0 {
 			// 使用申请到的节点建立连接
-			log.Printf("[客户端] 初始化成功申请到 %d 个中转节点", len(bestNodes))
+			coreLogf("[客户端] 初始化成功申请到 %d 个中转节点", len(bestNodes))
 			for _, node := range bestNodes {
 				latency := node.latency.Milliseconds()
-				log.Printf("[客户端] 中转节点: %s (评分: %.2f, 延迟: %dms)", node.ip, node.score, latency)
+				coreLogf("[客户端] 中转节点: %s (评分: %.2f, 延迟: %dms)", node.ip, node.score, latency)
 			}
-			log.Printf("[客户端] 每个节点建立 %d 条连接", p.config.Connections)
-			log.Printf("[客户端] 共计建立 %d 条 WebSocket 连接", len(bestNodes)*p.config.Connections)
+			coreLogf("[客户端] 每个节点建立 %d 条连接", p.config.Connections)
+			coreLogf("[客户端] 共计建立 %d 条 WebSocket 连接", len(bestNodes)*p.config.Connections)
 
 			// 根据申请到的节点数量重新分配连接池
 			total := len(bestNodes) * p.config.Connections
@@ -220,11 +229,11 @@ func (p *clientPool) Start(relayNodes []string) {
 		}
 
 		// 如果所有节点初始测速都失败
-		log.Printf("[客户端] 所有中转节点初始测速失败,直连服务端,建立 %d 条连接", p.config.Connections)
+		coreLogf("[客户端] 所有中转节点初始测速失败,直连服务端,建立 %d 条连接", p.config.Connections)
 	}
 
 	// 没有指定中转节点或所有节点不可用,直连服务端
-	log.Printf("[客户端] 未使用中转节点,直连服务端,建立 %d 条连接", p.config.Connections)
+	coreLogf("[客户端] 未使用中转节点,直连服务端,建立 %d 条连接", p.config.Connections)
 	for i := 0; i < p.config.Connections; i++ {
 		p.goDialAndServe(i, "")
 	}
@@ -237,7 +246,7 @@ func (p *clientPool) Start(relayNodes []string) {
 
 // Shutdown 关闭连接池
 func (p *clientPool) Shutdown() {
-	log.Printf("[客户端] 正在关闭所有连接...")
+	coreLogf("[客户端] 正在关闭所有连接...")
 
 	p.shutdownOnce.Do(func() {
 		p.shutdown()
@@ -280,7 +289,7 @@ func (p *clientPool) shutdown() {
 				// 等待对方响应或超时
 				_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
 				_ = conn.Close()
-				log.Printf("[客户端] 通道 %d 已关闭", chID)
+				coreLogf("[客户端] 通道 %d 已关闭", chID)
 			}(ws, i+1, i)
 			p.wsConns[i] = nil
 		}
@@ -294,10 +303,10 @@ func (p *clientPool) shutdown() {
 	select {
 	case <-doneCh:
 	case <-time.After(2 * time.Second):
-		log.Printf("[客户端] 等待拨号 goroutine 退出超时，强制返回")
+		coreLogf("[客户端] 等待拨号 goroutine 退出超时，强制返回")
 	}
 
-	log.Printf("[客户端] 所有连接已关闭")
+	coreLogf("[客户端] 所有连接已关闭")
 }
 
 // goDialAndServe 启动 dialAndServe goroutine 并纳入 WaitGroup 跟踪，确保 Shutdown 时能等待其退出。
@@ -318,7 +327,7 @@ func (p *clientPool) reconnectLoop() {
 		case <-p.ctx.Done():
 			return
 		case <-p.reconnectCh:
-			log.Printf("[客户端] 收到重连信号，强制重建所有通道")
+			coreLogf("[客户端] 收到重连信号，强制重建所有通道")
 			p.wsConnsMu.Lock()
 			for _, ws := range p.wsConns {
 				if ws != nil {
@@ -335,7 +344,7 @@ func (p *clientPool) Reconnect(reason string) {
 	if p.reconnectCh == nil {
 		return
 	}
-	log.Printf("[客户端] 重连请求: %s", reason)
+	coreLogf("[客户端] 重连请求: %s", reason)
 	select {
 	case p.reconnectCh <- struct{}{}:
 	default:
@@ -343,7 +352,7 @@ func (p *clientPool) Reconnect(reason string) {
 }
 
 func (p *clientPool) delayedStartPairWarmer(expectedCount int) {
-	log.Printf("[PairWarmer] 等待 %d 个通道就绪后启动...", expectedCount)
+	coreLogf("[PairWarmer] 等待 %d 个通道就绪后启动...", expectedCount)
 	timeout := time.NewTimer(30 * time.Second)
 	defer timeout.Stop()
 
@@ -353,21 +362,21 @@ func (p *clientPool) delayedStartPairWarmer(expectedCount int) {
 	for {
 		select {
 		case <-p.ctx.Done():
-			log.Printf("[PairWarmer] 启动取消（context 已关闭）")
+			coreLogf("[PairWarmer] 启动取消（context 已关闭）")
 			return
 		case <-timeout.C:
 			ready := int(atomic.LoadInt32(&p.readyChannels))
 			if ready > 0 {
-				log.Printf("[PairWarmer] 启动超时，但已有 %d/%d 通道就绪，继续启动", ready, expectedCount)
+				coreLogf("[PairWarmer] 启动超时，但已有 %d/%d 通道就绪，继续启动", ready, expectedCount)
 				p.pairWarmer.Run()
 			} else {
-				log.Printf("[PairWarmer] 启动超时且无就绪通道，放弃启动")
+				coreLogf("[PairWarmer] 启动超时且无就绪通道，放弃启动")
 			}
 			return
 		case <-checkTicker.C:
 			ready := int(atomic.LoadInt32(&p.readyChannels))
 			if ready >= expectedCount {
-				log.Printf("[PairWarmer] 全部 %d 个通道已就绪，启动 PairWarmer", ready)
+				coreLogf("[PairWarmer] 全部 %d 个通道已就绪，启动 PairWarmer", ready)
 				p.pairWarmer.Run()
 				return
 			}
@@ -445,14 +454,14 @@ func (p *clientPool) dialAndServe(idx int, ip string) {
 		// 检查是否需要退出
 		select {
 		case <-p.ctx.Done():
-			log.Printf("[客户端] 通道 %d 已收到退出信号", chID)
+			coreLogf("[客户端] 通道 %d 已收到退出信号", chID)
 			return
 		default:
 		}
 
 		// 检查重试次数
 		if retryCount >= dialAndServeMaxRetries && !slowRetryMode {
-			log.Printf("[客户端] 通道 %d 重试次数超限 (%d 次)，转入慢速持续重试", chID, dialAndServeMaxRetries)
+			coreLogf("[客户端] 通道 %d 重试次数超限 (%d 次)，转入慢速持续重试", chID, dialAndServeMaxRetries)
 			slowRetryMode = true
 			retryCount = 0
 			currentDelay = dialAndServeMaxDelay
@@ -471,12 +480,12 @@ func (p *clientPool) dialAndServe(idx int, ip string) {
 			}
 			newNode := p.relayManager.SelectNodeExcluding(excludeIPs)
 			if newNode != nil {
-				log.Printf("[客户端] 通道 %d 重连:申请新中转节点 %s (评分: %.2f, 延迟: %dms)",
+				coreLogf("[客户端] 通道 %d 重连:申请新中转节点 %s (评分: %.2f, 延迟: %dms)",
 					chID, newNode.ip, newNode.score, newNode.latency.Milliseconds())
 				ip = newNode.ip
 				relayInfo = fmt.Sprintf(" [中转: %s]", ip)
 			} else {
-				log.Printf("[客户端] 通道 %d 重连:无可用的健康中转节点,使用原有节点", chID)
+				coreLogf("[客户端] 通道 %d 重连:无可用的健康中转节点,使用原有节点", chID)
 			}
 		}
 		firstAttempt = false // 首次尝试后标记为 false
@@ -488,7 +497,7 @@ func (p *clientPool) dialAndServe(idx int, ip string) {
 			if relayInfo == "" && ip != "" {
 				relayInfo = fmt.Sprintf(" [中转: %s]", ip)
 			}
-			log.Printf("[客户端] 通道 %d%s 连接失败: %v (重试 %d/%d)", chID, relayInfo, err, retryCount, dialAndServeMaxRetries)
+			coreLogf("[客户端] 通道 %d%s 连接失败: %v (重试 %d/%d)", chID, relayInfo, err, retryCount, dialAndServeMaxRetries)
 
 			// 标记节点失败
 			if ip != "" && p.relayCount > 0 {
@@ -543,7 +552,7 @@ func (p *clientPool) dialAndServe(idx int, ip string) {
 			relayInfo = fmt.Sprintf(" [中转: %s]", ip)
 			lastIP = ip
 		}
-		log.Printf("[客户端] 通道 %d%s 已连接", chID, relayInfo)
+		coreLogf("[客户端] 通道 %d%s 已连接", chID, relayInfo)
 		// 会话级写队列：每次连接使用独立队列，旧连接遗留的 writeWorker
 		// 只能消费旧队列（其连接已关闭，很快自行退出），不会与新连接的
 		// writeWorker 抢数据包（修复断线重连后请求被旧 worker 吞掉的问题）。
@@ -594,7 +603,7 @@ func (p *clientPool) dialAndServe(idx int, ip string) {
 			p.relayManager.Release(ip)
 		}
 
-		log.Printf("[客户端] 通道 %d%s 断开,重连中...", chID, relayInfo)
+		coreLogf("[客户端] 通道 %d%s 断开,重连中...", chID, relayInfo)
 		select {
 		case <-p.ctx.Done():
 			return
@@ -682,7 +691,7 @@ func (p *clientPool) writeWorker(id int, conn *websocket.Conn, queue chan writeJ
 				p.connsWriteMutex[id].Lock()
 				_ = conn.SetWriteDeadline(time.Now().Add(p.config.WriteTimeout))
 				if err := conn.WriteMessage(websocket.PingMessage, []byte{}); err != nil {
-					log.Printf("[客户端] 通道 %d ping发送失败: %v", id+1, err)
+					coreLogf("[客户端] 通道 %d ping发送失败: %v", id+1, err)
 					p.connsWriteMutex[id].Unlock()
 					_ = conn.Close()
 					return
@@ -856,7 +865,7 @@ func (p *clientPool) asyncWriteDirect(chID int, msgType int, data []byte) error 
 			return nil
 		case <-timer.C:
 			p.releaseQueueBytes(size)
-			log.Printf("[客户端] 通道 %d 写队列满,队列长度: %d", chID, len(queue))
+			coreLogf("[客户端] 通道 %d 写队列满,队列长度: %d", chID, len(queue))
 			return fmt.Errorf("通道 %d 缓冲区拥堵", chID)
 		case <-p.ctx.Done():
 			p.releaseQueueBytes(size)
@@ -900,7 +909,7 @@ func (p *clientPool) noteUplink(connID string, chID int) {
 		st.uplink = chID
 	} else if st.uplink != chID {
 		// 调试日志:上行通道被覆盖时记录（需要时可解除注释）
-		// log.Printf("[客户端] 警告: 连接 %s 的上行通道从 %d 变更为 %d", protocol.ShortID(connID), st.uplink, chID)
+		// coreLogf("[客户端] 警告: 连接 %s 的上行通道从 %d 变更为 %d", protocol.ShortID(connID), st.uplink, chID)
 	}
 	p.mu.Unlock()
 }
@@ -975,12 +984,12 @@ func (p *clientPool) registerAndBroadcastTCPWithPair(connID, target string, firs
 		}
 		p.mu.Unlock()
 		msg := protocol.EncodeMessage(protocol.MsgTCPConnect, connID, meta, first)
-		log.Printf("[客户端] %s 使用 Hot Pair %s (键:%s TX %d RX %d) 单播拨号，ID:%s", reqType, pair.ID, protocol.ShortID(pair.PrebindID), pair.UplinkChID, pair.DownlinkChID, protocol.ShortID(connID))
+		coreLogf("[客户端] %s 使用 Hot Pair %s (键:%s TX %d RX %d) 单播拨号，ID:%s", reqType, pair.ID, protocol.ShortID(pair.PrebindID), pair.UplinkChID, pair.DownlinkChID, protocol.ShortID(connID))
 		if err := p.asyncWriteDirect(pair.UplinkChID, websocket.BinaryMessage, msg); err == nil {
 			return
 		}
 		// 热路径发送失败：清预置状态，释放 Pair 并废弃该通道，回退广播
-		log.Printf("[客户端] %s Hot Pair 上行通道 %d 发送失败，回退广播，ID:%s", reqType, pair.UplinkChID, protocol.ShortID(connID))
+		coreLogf("[客户端] %s Hot Pair 上行通道 %d 发送失败，回退广播，ID:%s", reqType, pair.UplinkChID, protocol.ShortID(connID))
 		p.mu.Lock()
 		if st = p.conns[connID]; st != nil {
 			st.pair = nil
@@ -995,7 +1004,7 @@ func (p *clientPool) registerAndBroadcastTCPWithPair(connID, target string, firs
 	msg := protocol.EncodeMessage(protocol.MsgTCPConnect, connID, meta, first)
 	sent := p.broadcastWrite(websocket.BinaryMessage, msg)
 	if sent == 0 {
-		log.Printf("[客户端] %s 广播 TCP 连接请求失败，无可用通道，ID:%s", reqType, protocol.ShortID(connID))
+		coreLogf("[客户端] %s 广播 TCP 连接请求失败，无可用通道，ID:%s", reqType, protocol.ShortID(connID))
 		p.Unregister(connID)
 	}
 }
@@ -1041,7 +1050,7 @@ func (p *clientPool) StartUDPRace(connID, target string) {
 
 	sent := p.broadcastWrite(websocket.BinaryMessage, protocol.EncodeMessage(protocol.MsgUDPConnect, connID, meta, nil))
 	if sent == 0 {
-		log.Printf("[客户端] SOCKS5 UDP 广播连接请求失败，无可用通道，ID:%s", protocol.ShortID(connID))
+		coreLogf("[客户端] SOCKS5 UDP 广播连接请求失败，无可用通道，ID:%s", protocol.ShortID(connID))
 		p.Unregister(connID)
 	}
 }
@@ -1107,7 +1116,7 @@ func (p *clientPool) Unregister(connID string) {
 	delete(p.conns, connID)
 	p.mu.Unlock()
 
-	log.Printf("[客户端] %s %s 访问: %s, 通道: TX %s RX %s, ID:%s, 已关闭",
+	coreLogf("[客户端] %s %s 访问: %s, 通道: TX %s RX %s, ID:%s, 已关闭",
 		client, typ, target, u, d, protocol.ShortID(connID))
 
 	if tcpConn != nil {
@@ -1316,7 +1325,7 @@ func (p *clientPool) handleChannel(chID int, conn *websocket.Conn) {
 	conn.SetPingHandler(func(m string) error {
 		_ = conn.SetReadDeadline(time.Now().Add(p.config.ReadTimeout))
 		if err := p.writeControlDirect(chID, websocket.PongMessage, []byte(m)); err != nil {
-			log.Printf("[客户端] 通道 %d pong发送失败: %v", chID, err)
+			coreLogf("[客户端] 通道 %d pong发送失败: %v", chID, err)
 		}
 		// pong 发送失败不影响 ping/pong 循环,总是返回 nil
 		return nil
@@ -1326,9 +1335,9 @@ func (p *clientPool) handleChannel(chID int, conn *websocket.Conn) {
 		mt, msg, err := conn.ReadMessage()
 		if err != nil {
 			if !protocol.IsNormalCloseError(err) {
-				log.Printf("[客户端] 通道 %d 读取消息失败: %v", chID, err)
+				coreLogf("[客户端] 通道 %d 读取消息失败: %v", chID, err)
 			} else {
-				log.Printf("[客户端] 通道 %d 正常关闭: %v", chID, err)
+				coreLogf("[客户端] 通道 %d 正常关闭: %v", chID, err)
 			}
 			return
 		}
@@ -1370,6 +1379,51 @@ func (p *clientPool) handleChannel(chID int, conn *websocket.Conn) {
 			}
 			p.noteUplink(connID, uplinkChID)
 
+			// [诊断] 预绑定竞速收帧统计：池级 map 计数，不受预绑定状态删除影响，
+			// 收帧窗口 3s 后由 AfterFunc 汇总打印一次并从 map 清理（每个 connID 仅一次）
+			isPrebind := strings.HasPrefix(connID, "prebind-") && !strings.Contains(connID, ".")
+			if isPrebind {
+				p.mu.Lock()
+				if p.prebindRacers == nil {
+					p.prebindRacers = make(map[string]*prebindRacer)
+				}
+				pr := p.prebindRacers[connID]
+				if pr == nil {
+					pr = &prebindRacer{}
+					p.prebindRacers[connID] = pr
+					connIDCopy := connID
+					time.AfterFunc(3*time.Second, func() {
+						// 服务端一轮一广播后，各通道收到单帧的时间差取决于各自链路延迟，
+						// 汇总窗口需覆盖慢通道，避免漏计（3s 足够，健康检查间隔 30s 不重叠）
+						p.mu.Lock()
+						pr2 := p.prebindRacers[connIDCopy]
+						if pr2 == nil || pr2.logged {
+							p.mu.Unlock()
+							return
+						}
+						pr2.logged = true
+						chs := append([]int(nil), pr2.chs...)
+						// 汇总打印后清理本次诊断条目，防止长期运行无界增长
+						delete(p.prebindRacers, connIDCopy)
+						p.mu.Unlock()
+						coreLogf("[PairWarmer] 预绑定 %s 收帧汇总: 去重后 %d 条不同通道收到 MsgSelectUplink: %v",
+							protocol.ShortID(connIDCopy), len(chs), chs)
+					})
+				}
+				// 按通道去重后才入列：诊断只关心'多少条不同通道收到过'
+				dup := false
+				for _, c := range pr.chs {
+					if c == chID {
+						dup = true
+						break
+					}
+				}
+				if !dup {
+					pr.chs = append(pr.chs, chID)
+				}
+				p.mu.Unlock()
+			}
+
 			// 选择当前通道作为下行通道（最快收到 MsgSelectUplink 的获胜）
 			selected, chosen, _, target, up, _ := p.selectDownlink(connID, chID)
 			if selected {
@@ -1381,7 +1435,7 @@ func (p *clientPool) handleChannel(chID int, conn *websocket.Conn) {
 				p.mu.RUnlock()
 				// 预绑定目标不输出访问日志
 				if chosen > 0 && target != "" && target != protocol.PrebindTarget {
-					log.Printf("[客户端] %s 访问: %s, 通道: TX %d RX %d, ID:%s",
+					coreLogf("[客户端] %s 访问: %s, 通道: TX %d RX %d, ID:%s",
 						clientAddr, target, up, chosen, protocol.ShortID(connID))
 				}
 				// 通过 uplink 通道发送 MsgSelectDownlink,meta 中携带已选中的下行通道号。
@@ -1393,7 +1447,9 @@ func (p *clientPool) handleChannel(chID int, conn *websocket.Conn) {
 
 				// 如果是预热请求（裸 prebind 键，无拨号后缀），通知 PairWarmer 完成 Pair 构建；
 				// 带后缀的拨号 connID 前缀相同但已脱离预热流程，不在此列
-				if p.pairWarmer != nil && strings.HasPrefix(connID, "prebind-") && !strings.Contains(connID, ".") {
+				if p.pairWarmer != nil && isPrebind {
+					coreLogf("[PairWarmer] 预绑定竞速完成: 候选上行=%d 下行=%d, connID=%s",
+						uplinkChID, chosen, protocol.ShortID(connID))
 					p.pairWarmer.HandlePrebindResult(connID, uplinkChID, chosen, nil)
 				}
 			}
@@ -1488,7 +1544,7 @@ func (p *clientPool) handleChannel(chID int, conn *websocket.Conn) {
 					}
 					p.mu.RUnlock()
 					ms := float64(time.Since(start)) / float64(time.Millisecond)
-					log.Printf("[客户端] %s %s 访问: %s, 通道: TX %d RX %d, ID:%s, 延迟 %.1f ms",
+					coreLogf("[客户端] %s %s 访问: %s, 通道: TX %d RX %d, ID:%s, 延迟 %.1f ms",
 						client, typ, target, up, chID, protocol.ShortID(connID), ms)
 				}
 			}
@@ -1580,13 +1636,13 @@ func (p *clientPool) handleBackpressure(state protocol.BackpressureState) {
 		case p.resumeCh <- struct{}{}:
 		default:
 		}
-		log.Printf("[客户端] 背压恢复，继续正常发送")
+		coreLogf("[客户端] 背压恢复，继续正常发送")
 
 	case protocol.BackpressureSlowDown:
-		log.Printf("[客户端] 收到减速通知，降低发送速率")
+		coreLogf("[客户端] 收到减速通知，降低发送速率")
 
 	case protocol.BackpressurePause:
-		log.Printf("[客户端] 收到暂停通知，等待恢复")
+		coreLogf("[客户端] 收到暂停通知，等待恢复")
 	}
 }
 
@@ -1604,7 +1660,7 @@ func (p *clientPool) waitForBackpressure() bool {
 		if time.Now().After(deadline) {
 			// 超时降级：不再阻塞，按减速状态继续发送
 			atomic.CompareAndSwapInt32(&p.backpressureState, int32(protocol.BackpressurePause), int32(protocol.BackpressureSlowDown))
-			log.Printf("[客户端] 背压暂停等待超时(3s)，降级为减速继续发送")
+			coreLogf("[客户端] 背压暂停等待超时(3s)，降级为减速继续发送")
 			return true
 		}
 

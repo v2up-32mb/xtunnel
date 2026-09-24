@@ -3,7 +3,6 @@ package xtunnel
 import (
 	"context"
 	"fmt"
-	"log"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -156,7 +155,7 @@ func (w *PairWarmer) removePair(pair *HotChannelPair) {
 	if w.primary == pair {
 		w.primary = nil
 	}
-	log.Printf("[PairWarmer] 移除 Pair %s (状态=%s, refs=%d)", removedID, pairStateString(pair.State()), atomic.LoadInt32(&pair.refs))
+	coreLogf("[PairWarmer] 移除 Pair %s (状态=%s, refs=%d)", removedID, pairStateString(pair.State()), atomic.LoadInt32(&pair.refs))
 }
 
 // InvalidateChannel 废弃包含指定通道的所有 Pair。
@@ -173,11 +172,11 @@ func (w *PairWarmer) InvalidateChannel(chID int) {
 		if pair.UplinkChID == chID || pair.DownlinkChID == chID {
 			if pair.State() != PairStateDraining {
 				pair.setState(PairStateDraining)
-				log.Printf("[PairWarmer] Pair %s 因通道 %d 失效进入 Draining (refs=%d)", pair.ID, chID, atomic.LoadInt32(&pair.refs))
+				coreLogf("[PairWarmer] Pair %s 因通道 %d 失效进入 Draining (refs=%d)", pair.ID, chID, atomic.LoadInt32(&pair.refs))
 			}
 			if atomic.LoadInt32(&pair.refs) <= 0 {
 				pair.setState(PairStateClosed)
-				log.Printf("[PairWarmer] Pair %s 立即移除 (无活跃引用)", pair.ID)
+				coreLogf("[PairWarmer] Pair %s 立即移除 (无活跃引用)", pair.ID)
 				w.pairs = append(w.pairs[:i], w.pairs[i+1:]...)
 				i--
 				if w.primary == pair {
@@ -203,7 +202,7 @@ func (w *PairWarmer) ensurePrimaryLocked() {
 		if pair.State() == PairStateReady {
 			w.primary = pair
 			if oldPrimary != "" {
-				log.Printf("[PairWarmer] primary 重新选举: %s -> %s", oldPrimary, pair.ID)
+				coreLogf("[PairWarmer] primary 重新选举: %s -> %s", oldPrimary, pair.ID)
 			}
 			return
 		}
@@ -283,7 +282,7 @@ func (w *PairWarmer) BuildPair(available []int) (*HotChannelPair, error) {
 	for _, chID := range available {
 		if err := w.pool.asyncWriteDirect(chID, websocket.BinaryMessage, msg); err != nil {
 			// 记录日志但继续其他通道
-			log.Printf("[PairWarmer] 预绑定请求发送到通道 %d 失败: %v", chID, err)
+			coreLogf("[PairWarmer] 预绑定请求发送到通道 %d 失败: %v", chID, err)
 		} else {
 			sent++
 		}
@@ -292,6 +291,7 @@ func (w *PairWarmer) BuildPair(available []int) (*HotChannelPair, error) {
 		w.deletePrebindState(connID)
 		return nil, fmt.Errorf("无法发送预绑定请求到任何可用通道")
 	}
+	coreLogf("[PairWarmer] 预绑定竞速广播: 可用通道 %d 个, 成功入队 %d 个, 失败 %d 个", len(available), sent, len(available)-sent)
 
 	// 等待预绑定结果
 	timer := time.NewTimer(w.config.PrebindTimeout)
@@ -334,13 +334,13 @@ func (w *PairWarmer) BuildPair(available []int) (*HotChannelPair, error) {
 				w.queueHotPairNotify(pair)
 				w.deletePrebindState(connID)
 				if wasPrimary == nil {
-					log.Printf("[PairWarmer] 首次构建 Pair (上行: %d, 下行: %d)，设为 primary（ID 待分配）", pair.UplinkChID, pair.DownlinkChID)
+					coreLogf("[PairWarmer] 首次构建 Pair (上行: %d, 下行: %d)，设为 primary（ID 待分配）", pair.UplinkChID, pair.DownlinkChID)
 				} else {
 					primaryLabel := wasPrimary.ID
 					if primaryLabel == "" {
 						primaryLabel = "未分配"
 					}
-					log.Printf("[PairWarmer] 构建候选 Pair (上行: %d, 下行: %d)，当前 primary=%s", pair.UplinkChID, pair.DownlinkChID, primaryLabel)
+					coreLogf("[PairWarmer] 构建候选 Pair (上行: %d, 下行: %d)，当前 primary=%s", pair.UplinkChID, pair.DownlinkChID, primaryLabel)
 				}
 				return pair, nil
 			}
@@ -458,7 +458,7 @@ func (w *PairWarmer) validatePrimaryChannels(primary *HotChannelPair, mode strin
 		}
 	}
 	if !uplinkValid || !downlinkValid {
-		log.Printf("[PairWarmer] %s模式下 primary %s 的通道已失效 (上行:%d 有效:%v, 下行:%d 有效:%v)，触发重建",
+		coreLogf("[PairWarmer] %s模式下 primary %s 的通道已失效 (上行:%d 有效:%v, 下行:%d 有效:%v)，触发重建",
 			mode, primary.ID, primary.UplinkChID, uplinkValid, primary.DownlinkChID, downlinkValid)
 		if !uplinkValid {
 			w.InvalidateChannel(primary.UplinkChID)
@@ -473,8 +473,8 @@ func (w *PairWarmer) validatePrimaryChannels(primary *HotChannelPair, mode strin
 
 // Run 启动 PairWarmer 主循环，监听通道就绪/失效通知并构建/刷新 Pair
 func (w *PairWarmer) Run() {
-	log.Printf("[PairWarmer] 启动运行循环")
-	defer log.Printf("[PairWarmer] 运行循环已退出")
+	coreLogf("[PairWarmer] 启动运行循环")
+	defer coreLogf("[PairWarmer] 运行循环已退出")
 
 	var refreshTicker *time.Ticker
 	if w.config.RefreshInterval > 0 {
@@ -522,19 +522,19 @@ func (w *PairWarmer) tryBuildPairs() {
 
 	available := w.pool.availableChannels()
 	if len(available) < 2 {
-		log.Printf("[PairWarmer] 可用通道不足 (%d)，无法构建 Pair", len(available))
+		coreLogf("[PairWarmer] 可用通道不足 (%d)，无法构建 Pair", len(available))
 		return
 	}
 
 	for readyCount < w.config.PairCount {
-		log.Printf("[PairWarmer] 尝试构建 Pair (%d/%d)，可用通道: %v", readyCount+1, w.config.PairCount, available)
+		coreLogf("[PairWarmer] 尝试构建 Pair (%d/%d)，可用通道: %v", readyCount+1, w.config.PairCount, available)
 		pair, err := w.BuildPair(available)
 		if err != nil {
-			log.Printf("[PairWarmer] 构建 Pair 失败: %v", err)
+			coreLogf("[PairWarmer] 构建 Pair 失败: %v", err)
 			return
 		}
 		w.assignPairSlot(pair)
-		log.Printf("[PairWarmer] 成功构建 Pair %s (上行: %d, 下行: %d)", pair.ID, pair.UplinkChID, pair.DownlinkChID)
+		coreLogf("[PairWarmer] 成功构建 Pair %s (上行: %d, 下行: %d)", pair.ID, pair.UplinkChID, pair.DownlinkChID)
 		readyCount++
 	}
 }
@@ -565,7 +565,7 @@ func (w *PairWarmer) tryRefresh() {
 			}
 		}
 		if !uplinkValid || !downlinkValid {
-			log.Printf("[PairWarmer] primary %s 的通道已失效 (上行:%d 有效:%v, 下行:%d 有效:%v)，标记为 Draining",
+			coreLogf("[PairWarmer] primary %s 的通道已失效 (上行:%d 有效:%v, 下行:%d 有效:%v)，标记为 Draining",
 				primary.ID, primary.UplinkChID, uplinkValid, primary.DownlinkChID, downlinkValid)
 			if !uplinkValid {
 				w.InvalidateChannel(primary.UplinkChID)
@@ -579,11 +579,212 @@ func (w *PairWarmer) tryRefresh() {
 	w.tryBuildPairs()
 }
 
-// periodicRefresh 周期性刷新：评估当前 Pair 状态并尝试补充/轮换 Pair。
-// 在单 Pair 模式下，通过发送探测请求验证通道质量；
-// 在多 Pair 模式下，会将最老的 Ready Pair 标记为 Draining 并重建，
-// 从而持续验证通道质量并避免 Pair 长期不变。
+// findReadyMatchLocked 在队列中查找与候选通道一致的 Ready Pair（调用方需持有 mu 读锁）。
+// 返回（队首匹配, 备用匹配）：与队首一致时返回队首；否则返回首个通道一致的备用。
+// 候选自身与 Draining/Closed Pair 均不参与比对（命中非 Ready 视为不匹配，走"全都不匹配"分支）。
+func (w *PairWarmer) findReadyMatchLocked(candidate *HotChannelPair) (*HotChannelPair, *HotChannelPair) {
+	if candidate == nil {
+		return nil, nil
+	}
+	var spareMatch *HotChannelPair
+	for _, pair := range w.pairs {
+		if pair == candidate || pair.State() != PairStateReady {
+			continue
+		}
+		if !pairChannelsEqual(candidate, pair) {
+			continue
+		}
+		if pair == w.primary {
+			return pair, nil
+		}
+		if spareMatch == nil {
+			spareMatch = pair
+		}
+	}
+	return nil, spareMatch
+}
+
+// promoteToHead 将队列中已有的 pair 提升为队首（位置 0）并设为 primary。
+// 用于"最优解已在队列备用位"时直接上位，避免新建重复 pair。
+func (w *PairWarmer) promoteToHead(pair *HotChannelPair) {
+	if pair == nil {
+		return
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	idx := -1
+	for i, p := range w.pairs {
+		if p == pair {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return
+	}
+	if idx > 0 {
+		w.pairs = append(w.pairs[:idx], w.pairs[idx+1:]...)
+		w.pairs = append([]*HotChannelPair{pair}, w.pairs...)
+	}
+	w.primary = pair
+}
+
+// replaceHeadWithCandidate 候选顶替队首：候选入队首（位置 0）并设为 primary；
+// 老队首健康则降级为第二位备用（位置 1），不销毁。
+func (w *PairWarmer) replaceHeadWithCandidate(candidate, oldHead *HotChannelPair) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if candidate == nil {
+		return
+	}
+	remove := func(p *HotChannelPair) bool {
+		for i, q := range w.pairs {
+			if q == p {
+				w.pairs = append(w.pairs[:i], w.pairs[i+1:]...)
+				return true
+			}
+		}
+		return false
+	}
+	if !remove(candidate) {
+		// 候选已被并发失效移除（通道断开），放弃顶替，避免二次插回
+		return
+	}
+	var demote *HotChannelPair
+	if oldHead != nil && oldHead != candidate && oldHead.State() == PairStateReady {
+		demote = oldHead
+		remove(oldHead)
+	}
+	w.pairs = append([]*HotChannelPair{candidate}, w.pairs...)
+	w.primary = candidate
+	if demote != nil {
+		w.pairs = append(w.pairs, nil)
+		copy(w.pairs[2:], w.pairs[1:])
+		w.pairs[1] = demote
+	}
+}
+
+// deduplicatePairs 队列去重：相同通道的 Ready Pair 只保留靠前的，剔除位于队列后边的重复项。
+// 重复项若在服务（refs>0，多为历史残留）则先标 Draining，引用归零后由 ReleasePair 移除。
+func (w *PairWarmer) deduplicatePairs() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	seen := make(map[string]*HotChannelPair, len(w.pairs))
+	for i := 0; i < len(w.pairs); i++ {
+		pair := w.pairs[i]
+		if pair.State() != PairStateReady {
+			continue
+		}
+		key := fmt.Sprintf("%d/%d", pair.UplinkChID, pair.DownlinkChID)
+		if prev, ok := seen[key]; ok {
+			// 后边重复项：剔除（保留靠前的 prev）
+			pair.setState(PairStateDraining)
+			if atomic.LoadInt32(&pair.refs) > 0 {
+				coreLogf("[PairWarmer] 去重: 位于队列后边的 Pair %s 与 %s 通道重复且在服务，标记 Draining", pair.ID, prev.ID)
+				continue
+			}
+			pair.setState(PairStateClosed)
+			w.pairs = append(w.pairs[:i], w.pairs[i+1:]...)
+			i--
+			if w.primary == pair {
+				w.primary = nil
+			}
+			coreLogf("[PairWarmer] 去重: 剔除位于队列后边、与 %s 通道重复的 Pair %s", prev.ID, pair.ID)
+			continue
+		}
+		seen[key] = pair
+	}
+	w.ensurePrimaryLocked()
+}
+
+// healthCheckSpares 备用体检：非队首的 Ready Pair 若任一通道已失效则删除（有引用则排干），
+// 健康则保留。队首（primary）的通道健康由重赛决策天然覆盖。
+func (w *PairWarmer) healthCheckSpares() {
+	available := w.pool.availableChannels()
+	isAlive := func(chID int) bool {
+		for _, c := range available {
+			if c == chID {
+				return true
+			}
+		}
+		return false
+	}
+	w.mu.RLock()
+	spares := make([]*HotChannelPair, 0, len(w.pairs))
+	for _, pair := range w.pairs {
+		if pair == w.primary || pair.State() != PairStateReady {
+			continue
+		}
+		spares = append(spares, pair)
+	}
+	w.mu.RUnlock()
+	for _, pair := range spares {
+		switch {
+		case !isAlive(pair.UplinkChID):
+			coreLogf("[PairWarmer] 备用 %s 上行通道 %d 已失效，删除", pair.ID, pair.UplinkChID)
+			w.InvalidateChannel(pair.UplinkChID)
+		case !isAlive(pair.DownlinkChID):
+			coreLogf("[PairWarmer] 备用 %s 下行通道 %d 已失效，删除", pair.ID, pair.DownlinkChID)
+			w.InvalidateChannel(pair.DownlinkChID)
+		}
+	}
+}
+
+// trimExcessPairs 数量对齐：Ready 数量超过 PairCount 时，从队列末尾（队尾）逐个淘汰；
+// 队尾有活跃引用则标记 Draining 等待释放。数量不足由调用方 tryBuildPairs 补足。
+func (w *PairWarmer) trimExcessPairs() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.config.PairCount <= 0 {
+		return
+	}
+	for {
+		readyCount := 0
+		for _, pair := range w.pairs {
+			if pair.State() == PairStateReady {
+				readyCount++
+			}
+		}
+		if readyCount <= w.config.PairCount {
+			break
+		}
+		var tail *HotChannelPair
+		for i := len(w.pairs) - 1; i >= 0; i-- {
+			if w.pairs[i].State() == PairStateReady {
+				tail = w.pairs[i]
+				break
+			}
+		}
+		if tail == nil {
+			break
+		}
+		tail.setState(PairStateDraining)
+		if atomic.LoadInt32(&tail.refs) > 0 {
+			coreLogf("[PairWarmer] 数量对齐: 队尾 Pair %s 有活跃引用，标记 Draining（引用归零后淘汰）", tail.ID)
+			break
+		}
+		tail.setState(PairStateClosed)
+		coreLogf("[PairWarmer] 数量对齐: Ready=%d/%d 超出，从队尾淘汰 Pair %s", readyCount, w.config.PairCount, tail.ID)
+		w.removePair(tail)
+	}
+	w.ensurePrimaryLocked()
+}
+
+// periodicRefresh 周期性刷新：每次体检都重赛一场，找出当前最优通道对并置顶。
+// 规则（单 Pair 与多 Pair 通用）：
+//  1. 重赛：向所有可用通道广播预绑定竞速，构建候选 Pair；
+//  2. 候选与队列内 Ready Pair 比对：
+//     - 与队首一致 → 队首连任，候选丢弃（"保持不变"仅在真比过之后出现）；
+//     - 与某备用一致 → 该备用直接提升为队首（不新建），候选丢弃，避免重复建档；
+//     - 与任何 Ready Pair 都不一致（含命中 Draining 的情形）→ 视为真·新最优：
+//     候选顶替队首，老队首降级为备用；
+//  3. 队列去重：相同通道的 Ready Pair 只保留靠前的，剔除位于队列后边的；
+//  4. 备用体检：失效则删、健康则留；
+//  5. 数量对齐：Ready 数超出 PairCount 从队尾淘汰，不足则补足。
 func (w *PairWarmer) periodicRefresh() {
+	// 周期心跳：对存量 Ready Pair 重发通知，刷新服务端表项时间戳（防 TTL 过期误清健康 Pair）
+	w.heartbeatHotPairNotify()
+
 	// 清理历史版本遗留的 refs=0 的 Draining Pair，避免列表无限膨胀
 	w.pruneIdleDrainingPairs()
 
@@ -602,107 +803,77 @@ func (w *PairWarmer) periodicRefresh() {
 	}
 	w.mu.RUnlock()
 
-	if readyCount >= w.config.PairCount {
-		if readyCount <= 1 {
-			// 单 Pair 模式：验证通道是否真实可用，而不是直接返回
-			log.Printf("[PairWarmer] 周期性刷新触发: Ready=%d/%d, primary=%s, allPairs=%v，单 Pair 模式验证通道质量", readyCount, w.config.PairCount, primaryID, stateList)
-			w.mu.RLock()
-			primary := w.primary
-			w.mu.RUnlock()
+	mode := "单 Pair"
+	if w.config.PairCount > 1 {
+		mode = "多 Pair"
+	}
+	coreLogf("[PairWarmer] 周期性刷新触发: Ready=%d/%d, primary=%s, allPairs=%v (%s)", readyCount, w.config.PairCount, primaryID, stateList, mode)
 
-			if primary != nil && primary.State() == PairStateReady {
-				available := w.pool.availableChannels()
-				uplinkValid := false
-				downlinkValid := false
-				for _, chID := range available {
-					if chID == primary.UplinkChID {
-						uplinkValid = true
-					}
-					if chID == primary.DownlinkChID {
-						downlinkValid = true
-					}
-				}
-				if !uplinkValid || !downlinkValid {
-					log.Printf("[PairWarmer] 单 Pair 模式下 primary %s 的通道已失效 (上行:%d 有效:%v, 下行:%d 有效:%v)，触发重建",
-						primary.ID, primary.UplinkChID, uplinkValid, primary.DownlinkChID, downlinkValid)
-					if !uplinkValid {
-						w.InvalidateChannel(primary.UplinkChID)
-					}
-					if !downlinkValid {
-						w.InvalidateChannel(primary.DownlinkChID)
-					}
-					// 触发重建
-					w.tryBuildPairs()
-					return
-				}
-				// 通道有效，不需要额外操作
-				log.Printf("[PairWarmer] 单 Pair 模式下 primary %s 的通道验证通过，保持不变", primary.ID)
-				return
-			}
-		} else {
-			// 多 Pair 模式：先验证 primary 通道仍可用（息屏/网络切换后通道可能已断），
-			// 再构建候选 Pair 决策。
-			// 若候选通道与选定的最老 Ready Pair 完全一致，则放弃候选、保留旧 Pair 继续服务，
-			// 避免无意义的重建与废弃；否则将旧 Pair 标记为 Draining，由候选 Pair 顶替。
-			w.mu.RLock()
-			primary := w.primary
-			w.mu.RUnlock()
-			if primary != nil && primary.State() == PairStateReady {
-				if !w.validatePrimaryChannels(primary, "多 Pair") {
-					// InvalidateChannel 已废弃失效 pair，Ready 数不足时补建
-					w.tryBuildPairs()
-					return
-				}
-			}
-			w.mu.RLock()
-			var oldest *HotChannelPair
-			for _, pair := range w.pairs {
-				if pair.State() == PairStateReady {
-					if oldest == nil || pair.createdAt.Before(oldest.createdAt) {
-						oldest = pair
-					}
-				}
-			}
-			w.mu.RUnlock()
-			if oldest == nil {
-				w.tryBuildPairs()
-				return
-			}
-			available := w.pool.availableChannels()
-			if len(available) < 2 {
-				log.Printf("[PairWarmer] 周期性刷新触发: Ready=%d/%d，可用通道不足 (%d)，无法构建候选，保留现有 Pair", readyCount, w.config.PairCount, len(available))
-				return
-			}
-			candidate, err := w.BuildPair(available)
-			if err != nil {
-				log.Printf("[PairWarmer] 周期性刷新触发: Ready=%d/%d, 构建候选 Pair 失败: %v，保留现有 Pair", readyCount, w.config.PairCount, err)
-				return
-			}
-			if pairChannelsEqual(candidate, oldest) {
-				w.discardCandidatePair(candidate)
-				log.Printf("[PairWarmer] 周期性刷新触发: 候选与最旧 Pair %s 通道完全一致 (上行:%d, 下行:%d)，跳过重建，旧 Pair 继续服务",
-					oldest.ID, oldest.UplinkChID, oldest.DownlinkChID)
-				return
-			}
-			// 通道不同：候选继承旧 Pair 的槽位 ID（底层 prebind connID 仍为 UUID），
-			// 旧 Pair 正常进入 Draining，不影响其 drain 状态
-			candidate.ID = oldest.ID
-			log.Printf("[PairWarmer] 周期性刷新触发: 新 Pair %s (上行: %d, 下行: %d) 顶替旧 Pair，旧 Pair 进入 Draining",
-				candidate.ID, candidate.UplinkChID, candidate.DownlinkChID)
-			if oldest.State() == PairStateReady {
-				log.Printf("[PairWarmer] 周期性刷新触发: Ready=%d/%d, primary=%s, allPairs=%v，将最老 Pair %s 标记为 Draining 以触发替换", readyCount, w.config.PairCount, primaryID, stateList, oldest.ID)
-				// refs==0 时立即移除，避免积累无引用的 Draining Pair
-				w.invalidatePair(oldest)
-			}
-			return
+	// ============ 1. 重赛一场：构建候选 ============
+	available := w.pool.availableChannels()
+	var candidate *HotChannelPair
+	if len(available) >= 2 {
+		var err error
+		candidate, err = w.BuildPair(available)
+		if err != nil {
+			coreLogf("[PairWarmer] 周期性刷新: 构建候选失败: %v，保留现有 Pair", err)
 		}
-	} else {
-		log.Printf("[PairWarmer] 周期性刷新触发: Ready=%d/%d (不足), primary=%s, allPairs=%v，尝试补充", readyCount, w.config.PairCount, primaryID, stateList)
+	} else if readyCount > 0 {
+		coreLogf("[PairWarmer] 周期性刷新: 可用通道不足 (%d)，无法重赛，保留现有 Pair", len(available))
 	}
 
-	w.tryBuildPairs()
+	// ============ 2. 候选与全队比对决策 ============
+	if candidate != nil {
+		w.mu.RLock()
+		head := w.primary
+		headMatch, spareMatch := w.findReadyMatchLocked(candidate)
+		w.mu.RUnlock()
 
-	// 刷新后再次检查 primary 是否变化
+		switch {
+		case headMatch != nil:
+			// 候选与队首一致：队首连任，冗余候选丢弃（真比过之后才"保持不变"）
+			coreLogf("[PairWarmer] 周期性刷新: 候选 (%d/%d) 与队首 %s 通道一致，队首连任，保持不变",
+				candidate.UplinkChID, candidate.DownlinkChID, headMatch.ID)
+			w.discardCandidatePair(candidate)
+		case spareMatch != nil:
+			// 最优解已在队列中（备用位）：直接提升为队首，候选丢弃，避免重复建档
+			coreLogf("[PairWarmer] 周期性刷新: 候选 (%d/%d) 与备用 %s 通道一致，提升 %s 为队首，新建候选丢弃",
+				candidate.UplinkChID, candidate.DownlinkChID, spareMatch.ID, spareMatch.ID)
+			w.promoteToHead(spareMatch)
+			w.discardCandidatePair(candidate)
+		default:
+			// 与任何 Ready Pair 都不一致（含命中 Draining）：视为真·新最优
+			if head == candidate {
+				// BuildPair 已在空队列场景把候选立为 primary，补分配槽位 ID
+				w.assignPairSlot(candidate)
+				coreLogf("[PairWarmer] 周期性刷新: 新 Pair (%d/%d) 已是队首（原队首缺失/不可用）",
+					candidate.UplinkChID, candidate.DownlinkChID)
+				break
+			}
+			w.assignPairSlot(candidate)
+			headLabel := "无"
+			if head != nil {
+				headLabel = head.ID
+			}
+			coreLogf("[PairWarmer] 周期性刷新: 候选 (%d/%d) 为新最优，分配槽位 %s，顶替队首 %s",
+				candidate.UplinkChID, candidate.DownlinkChID, candidate.ID, headLabel)
+			w.replaceHeadWithCandidate(candidate, head)
+		}
+	}
+
+	// ============ 3. 队列去重：相同通道只留靠前，剔除后边 ============
+	w.deduplicatePairs()
+
+	// ============ 4. 备用体检：失效删、健康留 ============
+	w.healthCheckSpares()
+
+	// ============ 5. 数量对齐：超出从队尾淘汰、不足补足 ============
+	w.trimExcessPairs()
+	w.tryBuildPairs()
+	// 补足过程可能再次撞出同通道 pair，兜底去重
+	w.deduplicatePairs()
+
+	// 刷新后检查 primary 是否变化
 	w.mu.RLock()
 	var newPrimaryID string
 	if w.primary != nil {
@@ -710,11 +881,11 @@ func (w *PairWarmer) periodicRefresh() {
 	}
 	w.mu.RUnlock()
 	if newPrimaryID != "" && newPrimaryID != primaryID {
-		log.Printf("[PairWarmer] primary 已切换: %s -> %s", primaryID, newPrimaryID)
+		coreLogf("[PairWarmer] primary 已切换: %s -> %s", primaryID, newPrimaryID)
 	}
 }
 
-// ======================== 预热通道对通知（双端热表） ========================
+// queueHotPairNotify 将 Ready Pair 加入待通知队列（按键去重，500ms 合批后发送）。
 
 // hotPairNotifyDebounce 新 Pair 通知的合批窗口
 const hotPairNotifyDebounce = 500 * time.Millisecond
@@ -770,11 +941,11 @@ func (w *PairWarmer) flushHotPairNotify() {
 				delete(w.notifyPending, info.Key)
 			}
 			w.notifyMu.Unlock()
-			log.Printf("[PairWarmer] 预热通道对已通知服务端 (%d 条)", len(pending))
+			coreLogf("[PairWarmer] 预热通道对已通知服务端 (%d 条)", len(pending))
 			return
 		}
 	}
-	log.Printf("[PairWarmer] 预热通道对通知发送失败，等待重试 (%d 条)", len(pending))
+	coreLogf("[PairWarmer] 预热通道对通知发送失败，等待重试 (%d 条)", len(pending))
 }
 
 // heartbeatHotPairNotify 周期心跳：对存量 Ready Pair 重发通知，

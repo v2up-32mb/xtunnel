@@ -2,7 +2,6 @@ package xtunnel
 
 import (
 	"context"
-	"log"
 	"math/rand"
 	"net"
 	"sort"
@@ -195,7 +194,7 @@ func (m *RelayNodeManager) AddNodeAndTest(address string, defaultPort string) ([
 		resolvedAddr := formatIPPort(ip, port)
 		node := m.newNode(resolvedAddr, resolvedAddr)
 		if err := m.TestNodeSpeed(node); err != nil {
-			log.Printf("[中转节点] TCP连接测试失败: %s, 错误: %v (节点已加入列表,等待后台测速)", resolvedAddr, err)
+			coreLogf("[中转节点] TCP连接测试失败: %s, 错误: %v (节点已加入列表,等待后台测速)", resolvedAddr, err)
 			node.mu.Lock()
 			node.Latency = 9999 * time.Second
 			node.SuccessRate = 0.0
@@ -223,13 +222,13 @@ func (m *RelayNodeManager) AddNodeAndTest(address string, defaultPort string) ([
 		return nil, err
 	}
 
-	log.Printf("[中转节点] 域名 %s 解析到 %d 个IP地址", host, len(addrs))
+	coreLogf("[中转节点] 域名 %s 解析到 %d 个IP地址", host, len(addrs))
 	nodes := make([]*RelayNode, 0, len(addrs))
 	for _, ip := range addrs {
 		resolvedAddr := formatIPPort(ip, port)
 		node := m.newNode(address, resolvedAddr)
 		if err := m.TestNodeSpeed(node); err != nil {
-			log.Printf("[中转节点] TCP连接测试失败: %s, 错误: %v (节点已加入列表,等待后台测速)", resolvedAddr, err)
+			coreLogf("[中转节点] TCP连接测试失败: %s, 错误: %v (节点已加入列表,等待后台测速)", resolvedAddr, err)
 			node.mu.Lock()
 			node.Latency = 9999 * time.Second
 			node.SuccessRate = 0.0
@@ -374,10 +373,10 @@ func (m *RelayNodeManager) updateHealthScore() {
 
 // Start 启动后台测速任务
 func (m *RelayNodeManager) Start() {
-	log.Printf("[客户端] 执行初始节点测速...")
+	coreLogf("[客户端] 执行初始节点测速...")
 	m.testAllNodes()
 	m.updateHealthScore()
-	log.Printf("[客户端] 初始节点测速完成")
+	coreLogf("[客户端] 初始节点测速完成")
 
 	m.testTimer = time.NewTimer(m.CurrentTestInterval())
 	go m.speedTestLoop()
@@ -485,7 +484,7 @@ func (m *RelayNodeManager) MarkNodeFailed(ip string) {
 	node.Score = 0.0
 	node.Weight = 0.0
 	node.mu.Unlock()
-	log.Printf("[中转节点] 节点 %s 标记失败 (连续失败: %d)", ip, failCount)
+	coreLogf("[中转节点] 节点 %s 标记失败 (连续失败: %d)", ip, failCount)
 }
 
 // MarkNodeSuccess 标记节点成功

@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/v2up-32mb/xtunnel/protocol"
 )
 
@@ -631,5 +632,313 @@ func TestRegisterConcurrentDialsDistinctConnIDs(t *testing.T) {
 			t.Fatalf("server got duplicate connID %q", connID)
 		}
 		gotIDs[connID] = true
+	}
+}
+
+// ======================== 周期性刷新（重赛决策）测试 ========================
+
+// newRefreshTestPool 构造周期刷新测试用的 clientPool：
+// 前 aliveN 条通道可用（wsConns 非 nil + 写队列就绪），供 availableChannels 判定。
+func newRefreshTestPool(t *testing.T, totalCh, aliveN, pairCount int) *clientPool {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	cfg := DefaultConfig()
+	cfg.EnableHotPair = true
+	cfg.Connections = totalCh
+	cfg.HotPairCount = pairCount
+
+	p := &clientPool{
+		ctx:              ctx,
+		cancel:           cancel,
+		config:           cfg,
+		conns:            make(map[string]*clientConnState),
+		wsConns:          make([]*websocket.Conn, totalCh),
+		writeQueues:      make([]chan writeJob, totalCh),
+		connsWriteMutex:  make([]sync.Mutex, totalCh),
+		globalQueueLimit: 1 << 20,
+		nextChannel:      1,
+	}
+	for i := 0; i < totalCh; i++ {
+		p.writeQueues[i] = make(chan writeJob, 16)
+		if i < aliveN {
+			p.wsConns[i] = &websocket.Conn{} // 标记该通道可用
+		}
+	}
+	p.pairWarmer = NewPairWarmer(p, cfg)
+	return p
+}
+
+// addReadyTestPair 直接向 warmer 追加一个 Ready pair 并返回
+func addReadyTestPair(w *PairWarmer, id string, ul, dl int, refs int32) *HotChannelPair {
+	pair := &HotChannelPair{
+		ID:           id,
+		PrebindID:    "prebind-" + id,
+		UplinkChID:   ul,
+		DownlinkChID: dl,
+		state:        int32(PairStateReady),
+		createdAt:    time.Now(),
+		refs:         refs,
+	}
+	w.mu.Lock()
+	w.pairs = append(w.pairs, pair)
+	w.mu.Unlock()
+	return pair
+}
+
+// setPrimaryHead 将 pair 设为 primary 并保证位于队首（位置 0）
+func setPrimaryHead(w *PairWarmer, pair *HotChannelPair) {
+	w.mu.Lock()
+	w.primary = pair
+	for i, p := range w.pairs {
+		if p == pair {
+			if i > 0 {
+				w.pairs = append(w.pairs[:i], w.pairs[i+1:]...)
+				w.pairs = append([]*HotChannelPair{pair}, w.pairs...)
+			}
+			break
+		}
+	}
+	w.mu.Unlock()
+}
+
+// injectPrebind 在后台轮询找到 BuildPair 注册的预绑定状态并回执指定上行/下行通道
+func injectPrebind(p *clientPool, uplink, downlink int) {
+	go func() {
+		for i := 0; i < 400; i++ {
+			p.mu.Lock()
+			var connID string
+			for id, st := range p.conns {
+				if st.target == protocol.PrebindTarget {
+					connID = id
+					break
+				}
+			}
+			p.mu.Unlock()
+			if connID != "" {
+				p.pairWarmer.HandlePrebindResult(connID, uplink, downlink, nil)
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}()
+}
+
+func countReady(w *PairWarmer) int {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	n := 0
+	for _, p := range w.pairs {
+		if p.State() == PairStateReady {
+			n++
+		}
+	}
+	return n
+}
+
+func readyChannels(w *PairWarmer) [][2]int {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	var out [][2]int
+	for _, p := range w.pairs {
+		if p.State() == PairStateReady {
+			out = append(out, [2]int{p.UplinkChID, p.DownlinkChID})
+		}
+	}
+	return out
+}
+
+// 单 Pair：重赛候选与队首一致 → 队首连任"保持不变"（真比过之后）
+func TestPeriodicRefreshSinglePairKeepWhenSame(t *testing.T) {
+	p := newRefreshTestPool(t, 4, 4, 1)
+	w := p.pairWarmer
+	head := addReadyTestPair(w, "01", 1, 2, 0)
+	setPrimaryHead(w, head)
+
+	injectPrebind(p, 1, 2) // 竞速赢家与队首同通道
+	w.periodicRefresh()
+
+	if w.primary != head {
+		t.Fatalf("expected head kept as primary when candidate matches, got %p", w.primary)
+	}
+	if countReady(w) != 1 {
+		t.Fatalf("expected 1 ready pair, got %d (%v)", countReady(w), readyChannels(w))
+	}
+	if head.State() != PairStateReady {
+		t.Fatalf("expected head still Ready, got %d", head.State())
+	}
+}
+
+// 单 Pair：重赛候选与队首不同 → 新最优顶替队首，老队首被裁剪
+func TestPeriodicRefreshSinglePairReplaceWhenDifferent(t *testing.T) {
+	p := newRefreshTestPool(t, 4, 4, 1)
+	w := p.pairWarmer
+	head := addReadyTestPair(w, "01", 1, 2, 0)
+	setPrimaryHead(w, head)
+
+	injectPrebind(p, 3, 4) // 竞速赢家是新通道对
+	w.periodicRefresh()
+
+	if w.primary == head {
+		t.Fatal("expected primary replaced by new optimal pair")
+	}
+	if w.primary == nil || w.primary.UplinkChID != 3 || w.primary.DownlinkChID != 4 {
+		t.Fatalf("expected new pair (3,4) as primary, got %+v", w.primary)
+	}
+	if countReady(w) != 1 {
+		t.Fatalf("expected 1 ready pair after replacement, got %d (%v)", countReady(w), readyChannels(w))
+	}
+	if head.State() != PairStateClosed && head.State() != PairStateDraining {
+		t.Fatalf("expected old head closed/draining, got %d", head.State())
+	}
+}
+
+// 多 Pair：重赛候选命中备用 → 备用直接提升为队首，新建候选丢弃（不出现重复通道对）
+func TestPeriodicRefreshMultiPromoteSpareWhenMatched(t *testing.T) {
+	p := newRefreshTestPool(t, 4, 4, 2)
+	w := p.pairWarmer
+	head := addReadyTestPair(w, "01", 1, 2, 0)
+	spare := addReadyTestPair(w, "02", 3, 4, 0)
+	setPrimaryHead(w, head)
+
+	injectPrebind(p, 3, 4) // 竞速赢家 = 备用 02 的通道
+	w.periodicRefresh()
+
+	if w.primary != spare {
+		t.Fatalf("expected spare promoted to primary, got %p", w.primary)
+	}
+	if countReady(w) != 2 {
+		t.Fatalf("expected 2 ready pairs, got %d (%v)", countReady(w), readyChannels(w))
+	}
+	// 不能有重复通道对（候选必须被丢弃）
+	ch := readyChannels(w)
+	if ch[0][0] == ch[1][0] && ch[0][1] == ch[1][1] {
+		t.Fatalf("duplicate pairs after refresh: %v", ch)
+	}
+}
+
+// 多 Pair：重赛候选全新 → 顶替队首，老队首降级，超出数量从队尾淘汰
+func TestPeriodicRefreshMultiReplaceHeadAndTrimTail(t *testing.T) {
+	p := newRefreshTestPool(t, 5, 5, 2)
+	w := p.pairWarmer
+	head := addReadyTestPair(w, "01", 1, 2, 0)
+	addReadyTestPair(w, "02", 3, 4, 0)
+	setPrimaryHead(w, head)
+
+	injectPrebind(p, 4, 5) // 全新通道对
+	w.periodicRefresh()
+
+	if w.primary == nil || w.primary.UplinkChID != 4 || w.primary.DownlinkChID != 5 {
+		t.Fatalf("expected new pair (4,5) as primary, got %+v", w.primary)
+	}
+	if countReady(w) != 2 {
+		t.Fatalf("expected 2 ready pairs (PairCount=2), got %d (%v)", countReady(w), readyChannels(w))
+	}
+	// 老队首应降级保留为备用，旧备用(3,4)作为队尾被淘汰
+	got := readyChannels(w)
+	has := func(ul, dl int) bool {
+		for _, c := range got {
+			if c[0] == ul && c[1] == dl {
+				return true
+			}
+		}
+		return false
+	}
+	if !has(1, 2) {
+		t.Fatalf("expected old head (1,2) kept as spare, got %v", got)
+	}
+	if has(3, 4) {
+		t.Fatalf("expected old tail spare (3,4) trimmed, got %v", got)
+	}
+}
+
+// 去重：相同通道的 Ready Pair 只保留靠前，剔除位于队列后边的
+func TestPairWarmerDeduplicatePairs(t *testing.T) {
+	cfg := DefaultConfig()
+	p := newTestClientPool(cfg)
+	w := NewPairWarmer(p, cfg)
+
+	head := addReadyTestPair(w, "01", 1, 2, 0)
+	mid := addReadyTestPair(w, "02", 3, 4, 0)
+	dup := addReadyTestPair(w, "03", 1, 2, 0) // 与队首重复，位于后边
+	setPrimaryHead(w, head)
+
+	w.deduplicatePairs()
+
+	if countReady(w) != 2 {
+		t.Fatalf("expected 2 ready pairs after dedup, got %d (%v)", countReady(w), readyChannels(w))
+	}
+	if dup.State() != PairStateClosed {
+		t.Fatalf("expected back duplicate removed, got %d", dup.State())
+	}
+	if mid.State() != PairStateReady || head.State() != PairStateReady {
+		t.Fatal("expected non-duplicate pairs untouched")
+	}
+}
+
+// 去重：后端重复项在服务（refs>0）时只标记 Draining，不强制移除
+func TestPairWarmerDeduplicatePairsKeepsBusyBackDup(t *testing.T) {
+	cfg := DefaultConfig()
+	p := newTestClientPool(cfg)
+	w := NewPairWarmer(p, cfg)
+
+	head := addReadyTestPair(w, "01", 1, 2, 0)
+	dup := addReadyTestPair(w, "03", 1, 2, 1) // 重复且在服务
+	setPrimaryHead(w, head)
+
+	w.deduplicatePairs()
+
+	if dup.State() != PairStateDraining {
+		t.Fatalf("expected busy back duplicate Draining, got %d", dup.State())
+	}
+	if countReady(w) != 1 {
+		t.Fatalf("expected 1 ready pair, got %d", countReady(w))
+	}
+}
+
+// 备用体检：备用 pair 的通道失效则删除，健康则保留
+func TestPairWarmerHealthCheckSpares(t *testing.T) {
+	p := newRefreshTestPool(t, 4, 2, 3) // 仅通道 1、2 可用
+	w := p.pairWarmer
+	head := addReadyTestPair(w, "01", 1, 2, 0)
+	bad := addReadyTestPair(w, "02", 3, 4, 0) // 通道 3/4 已失效
+	setPrimaryHead(w, head)
+
+	w.healthCheckSpares()
+
+	if bad.State() != PairStateClosed {
+		t.Fatalf("expected dead spare removed, got %d", bad.State())
+	}
+	if w.primary != head {
+		t.Fatal("expected head untouched")
+	}
+}
+
+// 数量对齐：Ready 超出 PairCount 时从队尾逐个淘汰，保留不超量
+func TestPairWarmerTrimExcessPairs(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.HotPairCount = 2
+	p := newTestClientPool(cfg)
+	w := NewPairWarmer(p, cfg)
+
+	head := addReadyTestPair(w, "01", 1, 2, 0)
+	s2 := addReadyTestPair(w, "02", 3, 4, 0)
+	s3 := addReadyTestPair(w, "03", 4, 5, 0)
+	s4 := addReadyTestPair(w, "04", 5, 6, 0)
+	setPrimaryHead(w, head)
+
+	w.trimExcessPairs()
+
+	if countReady(w) != 2 {
+		t.Fatalf("expected 2 ready pairs, got %d (%v)", countReady(w), readyChannels(w))
+	}
+	if s4.State() != PairStateClosed || s3.State() != PairStateClosed {
+		t.Fatalf("expected tail pairs s3/s4 trimmed, got s3=%d s4=%d", s3.State(), s4.State())
+	}
+	if s2.State() != PairStateReady {
+		t.Fatalf("expected s2 kept as spare, got %d", s2.State())
+	}
+	if w.primary != head {
+		t.Fatal("expected head untouched by trim")
 	}
 }

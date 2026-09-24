@@ -3,7 +3,6 @@ package xtunnel
 import (
 	"encoding/binary"
 	"fmt"
-	"log"
 	"net"
 	"strings"
 	"sync"
@@ -121,7 +120,7 @@ func (p *clientPool) handleReverseTCPConnect(chID int, connID string, meta []byt
 				rc, added := p.addReverseConn(connID, target, resolved, chID)
 				if added {
 					atomic.StoreInt32(&rc.sendCh, int32(pair.UplinkChID))
-					log.Printf("[客户端] 反向拨号请求: %s (预热 Pair %s 通道 %d/%d), ID:%s", target, pair.ID, pair.DownlinkChID, pair.UplinkChID, protocol.ShortID(connID))
+					coreLogf("[客户端] 反向拨号请求: %s (预热 Pair %s 通道 %d/%d), ID:%s", target, pair.ID, pair.DownlinkChID, pair.UplinkChID, protocol.ShortID(connID))
 					go p.dialReverseTarget(rc, connID, target, resolved)
 					return
 				}
@@ -140,7 +139,7 @@ func (p *clientPool) handleReverseTCPConnect(chID int, connID string, meta []byt
 	upBytes := make([]byte, 4)
 	binary.BigEndian.PutUint32(upBytes, uint32(chID))
 	_ = p.broadcastWrite(websocket.BinaryMessage, protocol.EncodeMessage(protocol.MsgSelectUplink, connID, upBytes, nil))
-	log.Printf("[客户端] 反向拨号请求: %s (来自通道 %d), ID:%s", target, chID, protocol.ShortID(connID))
+	coreLogf("[客户端] 反向拨号请求: %s (来自通道 %d), ID:%s", target, chID, protocol.ShortID(connID))
 
 	go p.dialReverseTarget(rc, connID, target, resolved)
 }
@@ -150,7 +149,7 @@ func (p *clientPool) handleReverseTCPConnect(chID int, connID string, meta []byt
 func (p *clientPool) dialReverseTarget(rc *reverseConn, connID, target, resolved string) {
 	conn, err := net.DialTimeout("tcp", resolved, p.config.ConnectTimeout)
 	if err != nil {
-		log.Printf("[客户端] 反向拨号失败 %s -> %s: %v", protocol.ShortID(connID), target, err)
+		coreLogf("[客户端] 反向拨号失败 %s -> %s: %v", protocol.ShortID(connID), target, err)
 		_ = p.broadcastWrite(websocket.BinaryMessage, protocol.EncodeMessage(protocol.MsgConnStatus, connID, []byte{byte(protocol.StatusERR)}, nil))
 		p.removeReverseConn(connID)
 		return
@@ -164,7 +163,7 @@ func (p *clientPool) dialReverseTarget(rc *reverseConn, connID, target, resolved
 		if err != nil {
 			// 正常的关闭处理
 			if !protocol.IsNormalCloseError(err) {
-				log.Printf("[客户端] 反向连接读错误 %s: %v", protocol.ShortID(connID), err)
+				coreLogf("[客户端] 反向连接读错误 %s: %v", protocol.ShortID(connID), err)
 			}
 			p.sendReverseClose(rc, connID)
 			return
@@ -336,9 +335,9 @@ func (p *clientPool) handleReverseListenResult(connID string, meta []byte) {
 		spec = state.spec
 	}
 	if status == protocol.StatusOK {
-		log.Printf("[客户端] 反向监听已注册: %s", spec)
+		coreLogf("[客户端] 反向监听已注册: %s", spec)
 	} else {
-		log.Printf("[客户端] 反向监听注册失败: %s: %s", spec, reason)
+		coreLogf("[客户端] 反向监听注册失败: %s: %s", spec, reason)
 	}
 }
 
@@ -371,7 +370,7 @@ func (p *clientPool) checkReverseRegFatal() {
 		if p.config.OnReverseError != nil {
 			p.config.OnReverseError(fmt.Errorf("%s", "反向监听全部未响应"))
 		} else {
-			log.Printf("[客户端] 反向监听全部未响应")
+			coreLogf("[客户端] 反向监听全部未响应")
 		}
 		return
 	}
@@ -382,6 +381,6 @@ func (p *clientPool) checkReverseRegFatal() {
 	if p.config.OnReverseError != nil {
 		p.config.OnReverseError(fmt.Errorf("%s", msg))
 	} else {
-		log.Printf("[客户端] %s", msg)
+		coreLogf("[客户端] %s", msg)
 	}
 }
