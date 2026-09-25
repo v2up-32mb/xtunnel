@@ -1,6 +1,10 @@
 # xtunnel
 
-x-tunnel 多通道 WebSocket 隧道的 **Go 客户端核心库**（module `github.com/v2up-32mb/xtunnel`）。
+x-tunnel 多通道 WebSocket 隧道的 **Go 核心库（模块 `github.com/v2up-32mb/xtunnel`）**，
+**客户端与服务端能力一体**——统一日志钩子（`SetLogf`/`LogEvent`）、共享协议与配置：
+
+- **客户端能力**（库根包）：多通道连接池、代理适配、反向出网、中继、ECH/DoH、HotPair 预热
+- **服务端能力**（`server/` 子包）：隧道服务、连接池与背压、热表、反向监听
 
 从 [`x-tunnel`](https://github.com/v2up-32mb/x-tunnel)（CLI 仓库，现 `xtunnel-cli`）中提取的协议实现层，
 供 Android 客户端（[`x-client`](https://github.com/v2up-32mb/x-client) 的 gomobile AAR）与 CLI 共同引用。
