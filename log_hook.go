@@ -55,3 +55,9 @@ func SetLogf(fn func(ev LogEvent)) {
 func coreLog(level LogLevel, module, format string, args ...any) {
 	coreLogHook.Load().(logHookFunc)(LogEvent{Level: level, Module: module, Time: time.Now(), Format: format, Args: args})
 }
+
+// CoreLog 统一的公开日志入口（与 SetLogf 同一套事件体系）。
+// 供库内子包（如 server/）与第三方接入方使用；module 建议使用带命名空间的名称（如 "server.pool"）。
+func CoreLog(level LogLevel, module, format string, args ...any) {
+	coreLog(level, module, format, args...)
+}

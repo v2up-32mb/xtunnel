@@ -1,53 +1,26 @@
+// server 子包日志接入：复用 xtunnel 顶层“统一日志钩子”（单一 LogEvent/SetLogf 体系）。
+//
+// 核心库定位为统一库（客户端 + 服务端能力一体），不设第二套日志事件。
+// 服务端核心不直接向 stdout 输出日志；所有信息经 srvLog 转发到 xtunnel.CoreLog，
+// 由壳（xtunnel.SetLogf 注入的钩子）统一等级过滤、模块路由与输出；默认静默。
+//
+// module 命名空间：服务端事件统一带 "server." 前缀（如 "server.pool" / "server.handler"），
+// 与客户端模块（"pool" / "pair_warmer" / ...）区分，便于壳按模块路由。
 package server
 
-import (
-	"sync/atomic"
-	"time"
-)
+import "github.com/v2up-32mb/xtunnel"
 
-// 服务端核心约定：不直接向 stdout/stderr 输出日志（为进入上游核心库 xtunnel/server 做准备）。
-// 所有需要展示的信息统一经 serverLogHook 以 LogEvent 形式交给壳处理，
-// 壳负责按等级过滤、按模块路由并决定输出目标与格式；核心默认静默。
-
-// LogLevel 日志等级（与客户端核心 xtunnel.LogLevel 对齐，便于后续统一合并）
-type LogLevel int
+// LogLevel 类型别名：与 xtunnel.LogLevel 为同一类型（不另设等级体系）。
+type LogLevel = xtunnel.LogLevel
 
 const (
-	LevelDebug LogLevel = iota
-	LevelInfo
-	LevelWarn
-	LevelError
+	LevelDebug = xtunnel.LevelDebug
+	LevelInfo  = xtunnel.LevelInfo
+	LevelWarn  = xtunnel.LevelWarn
+	LevelError = xtunnel.LevelError
 )
 
-// LogEvent 一条服务端核心日志事件
-type LogEvent struct {
-	Level  LogLevel
-	Module string // 来源模块：handler / pool / server / connection / reverse / reverse_listener / hotpair_table
-	Time   time.Time
-	Format string
-	Args   []any
-}
-
-type serverLogHookFunc func(LogEvent)
-
-// serverLogHook 用 atomic.Value 存储，允许运行时安全切换。
-var serverLogHook atomic.Value // stores serverLogHookFunc
-
-func init() {
-	serverLogHook.Store(serverLogHookFunc(func(LogEvent) {}))
-}
-
-// SetLogf 由壳注入日志事件处理函数；传入 nil 恢复静默。
-// 可随时调用（原子切换）；注入的 hook 必须并发安全。
-func SetLogf(fn func(ev LogEvent)) {
-	if fn == nil {
-		serverLogHook.Store(serverLogHookFunc(func(LogEvent) {}))
-		return
-	}
-	serverLogHook.Store(serverLogHookFunc(fn))
-}
-
-// srvLog 服务端核心统一日志入口（带等级与模块元数据）
+// srvLog 服务端核心统一日志入口：转发到 xtunnel 统一钩子（module 加 server. 命名空间前缀）
 func srvLog(level LogLevel, module, format string, args ...any) {
-	serverLogHook.Load().(serverLogHookFunc)(LogEvent{Level: level, Module: module, Time: time.Now(), Format: format, Args: args})
+	xtunnel.CoreLog(level, "server."+module, format, args...)
 }
