@@ -5,12 +5,20 @@ import (
 	"errors"
 	"io"
 	"net"
+	"strings"
 
 	"github.com/gorilla/websocket"
 )
 
-// shortID 返回短格式的连接 ID（用于日志）
+// shortID 返回短格式的连接 ID（用于日志）。
+// 默认截取前 8 位；但 prebind 连接的 connID 形如 "prebind-<uuid>"，
+// 前缀本身恰好 8 字符会占满窗口导致 UUID 完全不可见，
+// 因此对此类 ID 保留前缀 + 后续 8 位（共 16 位），便于区分不同 prebind 轮次
+// 并对照 hotpair 表键。纯展示层调整，不影响协议。
 func ShortID(id string) string {
+	if strings.HasPrefix(id, "prebind-") && len(id) >= 16 {
+		return id[:16]
+	}
 	if len(id) >= 8 {
 		return id[:8]
 	}
