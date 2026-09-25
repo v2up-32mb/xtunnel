@@ -10,6 +10,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
+
+	"github.com/v2up-32mb/xshared/pipe"
 	"github.com/v2up-32mb/xtunnel/protocol"
 )
 
@@ -38,7 +40,7 @@ type ServerReverseConn struct {
 }
 
 func newServerReverseConn(connID, clientID, target string) *ServerReverseConn {
-	appEnd, tunEnd := NewBufferedPipe()
+	appEnd, tunEnd := pipe.NewBufferedPipe()
 	return &ServerReverseConn{
 		connID:        connID,
 		target:        target,

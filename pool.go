@@ -126,7 +126,7 @@ func newClientPool(cfg *Config, ctx context.Context, cancel context.CancelFunc) 
 		ctx:                  ctx,
 		cancel:               cancel,
 		clientID:             cfg.ClientID,
-		echManager:           newSharedEchManager(cfg),
+		echManager:           ech.NewEchManagerFromDoH(cfg.DNSServer, cfg.ECHDomain, 0, 0),
 		relayManager:         NewRelayNodeManager(),
 		wsConns:              make([]*websocket.Conn, cfg.Connections),
 		writeQueues:          make([]chan writeJob, cfg.Connections),

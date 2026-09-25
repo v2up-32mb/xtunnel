@@ -8,6 +8,7 @@ import (
 	"github.com/v2up-32mb/xshared/config"
 	"github.com/v2up-32mb/xshared/httpproxy"
 	"github.com/v2up-32mb/xshared/socks5"
+
 	"github.com/v2up-32mb/xtunnel/protocol"
 )
 
@@ -80,7 +81,7 @@ func (m *ReverseListenerManager) HandleReverseListen(clientID string, chID int, 
 		opts := []socks5.Option{}
 		if user != "" || pass != "" {
 			opts = append(opts, socks5.WithUserPassAuth(func(u, p string) bool {
-				return AuthEqual(u, user) && AuthEqual(p, pass)
+				return socks5.AuthEqual(u, user) && socks5.AuthEqual(p, pass)
 			}))
 		}
 		s := socks5.NewServer(cfg, dialer, opts...)
@@ -94,7 +95,7 @@ func (m *ReverseListenerManager) HandleReverseListen(clientID string, chID int, 
 		opts := []httpproxy.Option{}
 		if user != "" || pass != "" {
 			opts = append(opts, httpproxy.WithUserPassAuth(func(u, p string) bool {
-				return AuthEqual(u, user) && AuthEqual(p, pass)
+				return socks5.AuthEqual(u, user) && socks5.AuthEqual(p, pass)
 			}))
 		}
 		s := httpproxy.NewServer(cfg, dialer, opts...)
