@@ -4,7 +4,45 @@
 版本格式遵循 [语义化版本](https://semver.org/lang/zh-CN/)；`protocol/` 子包的任何变更都单独标注，方便下游评估是否需要同步升级服务端。
 
 > 升级速查：**协议版本 = 0x22（MsgHotPairNotify）**。协议消息集自 v0.2.0 起未再变化；
-> 后续版本均为客户端侧行为/展示/日志改动，服务端无需跟随升级（除非另行标注）。
+> 后续版本均为组件/展示/日志改动，服务端无需跟随升级（除非另行标注）。
+
+---
+
+## v0.3.0 — 2026-09-26
+
+**统一核心库（客户端 + 服务端能力一体，纯协议核心）**
+
+**Added / Changed**
+
+- **服务端能力并入根包**：`xtunnel-cli` 的 `server/pkg` 全部代码（handler/pool/connection/
+  reverse/reverse_listener/hotpair_table/config/cert + 测试）合并进根包 `xtunnel`，
+  不再有 `server/` 子包。下游导入同一包、选能力即用：
+  - 客户端：`xtunnel.NewClient`/`NewClientPool`/`NewPairWarmer`/`NewRelayNodeManager`
+  - 服务端：`xtunnel.NewServer`/`DefaultServerConfig`/`NewHotPairTable`/`NewReverseListenerManager`
+- **统一一套日志体系**：`xtunnel.SetLogf`/`LogEvent`/`LevelDebug|Info|Warn|Error`/`CoreLog`。
+  服务端日志 `srvLog` 走同一钩子，module 加 `server.` 前缀（`server.pool`/`server.handler`/...）。
+  不再存在第二套服务端日志类型或 `SetLogf`。
+- **通用能力上移 `xshared`（纯协议核心）**：
+  - `ParseSocks5Auth`/`AuthEqual` → `xshared/socks5`
+  - ECH/DoH 装配 → `xshared/ech.NewEchManagerFromDoH`（`ech_bridge.go` 删除）
+  - `NewBufferedPipe` → `xshared/pipe`
+  - 本库仅保留：8 字节二进制协议、通道池、下行竞争、背压、心跳、HotPair 热表/预绑定、
+    反向隧道、中继、配置、dialer 接口实现（`poolStreamDialer`/`poolUDPDialer` 因依赖内部池
+    必须留在本库）。
+
+**Breaking（下游升级动作）**
+
+- ⚠️ `xtunnel.ParseSocks5Auth`/`AuthEqual` **已删除** → 改用 `xshared/socks5.ParseSocks5Auth`/`AuthEqual`。
+- ⚠️ `xtunnel.NewBufferedPipe` **已删除** → 改用 `xshared/pipe.NewBufferedPipe`。
+- ⚠️ 服务端配置：本库内 `ServerConfig`/`DefaultServerConfig`（合并前 `server.Config`/`server.DefaultConfig`）。
+- 日志：服务端事件 module 前缀由 `pool`/`handler` 变为 `server.pool`/`server.handler`（壳按需适配）。
+- 依赖：`github.com/v2up-32mb/xshared` 最低 **v0.1.1**。
+
+**升级指引**
+
+- 协议消息集未变，服务端无需跟随升级。
+- 客户端壳：升 `xshared` 至 v0.1.1，`ParseSocks5Auth`/`AuthEqual`/`NewBufferedPipe` 改调 xshared。
+- 服务端壳：删本地 `server/pkg`，导入 `xtunnel` 用 `NewServer`/`ServerConfig`，`xtunnel.SetLogf` 接管渲染。
 
 ---
 

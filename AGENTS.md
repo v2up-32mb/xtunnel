@@ -34,6 +34,9 @@
    `protocol.ShortID` 对 `prebind-` 形态保留前缀+8 位 UUID 展示（勿改回纯前 8 位截断）。
 4. **行为改动不得悄悄发生**。重赛制、日志签名、选路策略这类影响下游行为的变更，
    一律进 CHANGELOG 的"升级指引"，标注是可选还是破坏性。
+5. **能力分层**：本库只保留核心协议（编解码/池/热表/背压/反向隧道/中继/配置）。
+   通用能力（ECH/DoH、SOCKS5/HTTP、pipe、解析工具）一律在 `xshared`，此处只调用不实现；
+   新发现的通用重复实现应上移 xshared。
 
 ## 发版流程（每个 tag 必修）
 
@@ -45,16 +48,19 @@
 
 ## 结构速览
 
-| 文件/目录 | 职责 |
+| 文件 | 职责 |
 |---|---|
 | `protocol/` | 8 字节二进制协议、消息常量、错误判定、`ShortID`、IP 策略 |
-| `pool.go` | 多通道连接池、下行竞争、背压、快重试、统计 |
+| `pool.go` | 客户端多通道连接池、下行竞争、背压、快重试、统计 |
 | `pair_warmer.go` | HotPair 双端热表、周期健康检查（重赛制）、预绑定竞速 |
-| `reverse.go` | 反向模式：服务端开监听、客户端出网 |
+| `reverse.go` / `reverse_server.go` | 客户端反向出网 / 服务端反向隧道 |
+| `server_pool.go` / `handler.go` / `connection.go` / `hotpair_table.go` / `reverse_listener.go` | 服务端能力 |
 | `relay.go` | 中继节点评分、加权负载均衡、测速 |
-| `ech_bridge.go` | ECH/DoH 共享栈（依赖 `xshared`） |
-| `proxy_dialer.go` | 池 → `xshared/dialer` 桥接（stream/udp） |
-| `log_hook.go` | 日志事件钩子（唯一日志出口） |
+| `proxy_dialer.go` | 池 → `xshared/dialer` 接口实现（通用能力在 xshared） |
+| `log_hook.go` | 统一日志事件钩子（唯一日志出口，含 `srvLog`） |
+
+**能力分层铁律**：本库仅核心协议。一切通用能力（ECH/DoH、SOCKS5/HTTP 服务器与解析、
+内存管道 `pipe`）都属于 `xshared`；在本库发现通用实现应立即上移 xshared 并改调。
 
 ## 兼容性立场
 
@@ -69,21 +75,16 @@
 
 批次 = 三个工作项一次版本。推荐顺序随依赖而定：**先 C（服务端入库，做完再动协议）→ 再 B（协议）→ 方向 2（事件）可与 B 并行或随 v0.3.1**。
 
-### ① C 方案：服务端核心库化（先做，无依赖）
+### ① C 方案：服务端核心化 —— ✅ 已完成（超越原目标）
 
-- **目标**：把 `xtunnel-cli` 的 `server/pkg` 迁入本库 `server/` 子包（`package server`）。
-- **前置状态**：✅ 服务端核心日志已收敛为注入钩子（`server.SetLogf`，默认静默，50 处 `srvLog` 带等级/模块），壳已统一 `[等级][模块]`；迁移只差改 import 与包名。
-- **进度**（本批次已推进）：
-  - ✅ 步骤 1-2：`server/` 子包已迁入（commit `6c9d78c`），`go test ./... -race` 全绿；
-  - ✅ 步骤 3 验证：CLI 壳本地 replace 切到本库 `server`，编译/测试/静态二进制构建全通过（`SetLogf` 已就位，零其他改动）；实验后已回退，保持 CLI 服务端原状可运行；
-  - ⏳ 正式切换（步骤 3-4 提交）随 v0.3.0 发布时执行：CLI 删本地 `server/pkg`、go.mod 升版后壳改 import。
-- **步骤**：
-  1. 复制 `xtunnel-cli/server/pkg/*.go`（handler/pool/connection/server/reverse/reverse_listener/hotpair_table/config/cert + 测试）→ 本库 `server/`；
-  2. import 从 `x-tunnel/server/pkg` 改为 `github.com/v2up-32mb/xtunnel/{protocol,server}`；
-  3. CLI 壳 `server/cmd/x-tunnel-server` 改依赖本库，启动时 `server.SetLogf(renderServerLog)`；
-  4. 回归：本库 `go test ./... -race`、CLI 服务端功能测试、重部署验证日志格式不变。
-- **验收**：CLI 服务端与核心库同版本同步发版；双方日志行为不变。
-- **代价**：CLI 壳迁移 + 三方回归；协议与服务端同库导致发版耦合（可接受）。
+- **目标**：把 `xtunnel-cli` 的 `server/pkg` 并入本库。
+- **结果**：不止并入 `server/` 子包——随后按架构要求**直接合并进根包**（无子目录），
+  统一为一套日志钩子（`xtunnel.SetLogf`/`LogEvent`/`CoreLog`，`srvLog` 走 `server.` 模块前缀），
+  服务端 `Config`→`ServerConfig`、`DefaultConfig`→`DefaultServerConfig`。
+- **验收达成**：CLI 壳本地 replace 验证编译/测试/静态二进制全通过；正式切换（删 CLI `server/pkg`、
+  go.mod 升版后壳改 import `xtunnel`）随 v0.3.0 发布执行。
+- **额外符合架构**：通用能力（socks5 解析/鉴权、ECH 装配、内存管道）已上移 `xshared` v0.1.1，
+  本库保持纯协议核心。
 
 ### ② B 方案：显式 begin 协议（协议变更，随 C 之后做）
 
