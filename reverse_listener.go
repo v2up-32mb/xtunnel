@@ -1,19 +1,15 @@
-package server
+package xtunnel
 
 import (
 	"fmt"
 	"strings"
 	"sync"
 
-	"github.com/gorilla/websocket"
 	"github.com/v2up-32mb/xshared/config"
 	"github.com/v2up-32mb/xshared/httpproxy"
 	"github.com/v2up-32mb/xshared/socks5"
-	"github.com/v2up-32mb/xtunnel"
 	"github.com/v2up-32mb/xtunnel/protocol"
 )
-
-const websocketBinary = websocket.BinaryMessage
 
 type reverseListener struct {
 	spec       string
@@ -84,7 +80,7 @@ func (m *ReverseListenerManager) HandleReverseListen(clientID string, chID int, 
 		opts := []socks5.Option{}
 		if user != "" || pass != "" {
 			opts = append(opts, socks5.WithUserPassAuth(func(u, p string) bool {
-				return xtunnel.AuthEqual(u, user) && xtunnel.AuthEqual(p, pass)
+				return AuthEqual(u, user) && AuthEqual(p, pass)
 			}))
 		}
 		s := socks5.NewServer(cfg, dialer, opts...)
@@ -98,7 +94,7 @@ func (m *ReverseListenerManager) HandleReverseListen(clientID string, chID int, 
 		opts := []httpproxy.Option{}
 		if user != "" || pass != "" {
 			opts = append(opts, httpproxy.WithUserPassAuth(func(u, p string) bool {
-				return xtunnel.AuthEqual(u, user) && xtunnel.AuthEqual(p, pass)
+				return AuthEqual(u, user) && AuthEqual(p, pass)
 			}))
 		}
 		s := httpproxy.NewServer(cfg, dialer, opts...)

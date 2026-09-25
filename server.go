@@ -1,4 +1,4 @@
-package server
+package xtunnel
 
 import (
 	"context"
@@ -12,7 +12,7 @@ import (
 
 // Server 服务端接口
 type Server struct {
-	config  *Config
+	config  *ServerConfig
 	pool    *serverPool
 	httpSrv *http.Server
 	cert    tls.Certificate
@@ -30,7 +30,7 @@ type ServerStats struct {
 }
 
 // NewServer 创建新的服务端实例
-func NewServer(cfg *Config) (*Server, error) {
+func NewServer(cfg *ServerConfig) (*Server, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}

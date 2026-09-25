@@ -1,4 +1,4 @@
-package server
+package xtunnel
 
 import (
 	"net/http"
@@ -30,7 +30,7 @@ func dialServerWS(t *testing.T, server *httptest.Server, clientID string, chID i
 // TestMultipleClientsCanShareSameChID 回归测试：
 // 不同客户端可以使用相同的 ch_id 同时在线，互不拒绝、互不干扰。
 func TestMultipleClientsCanShareSameChID(t *testing.T) {
-	cfg := DefaultConfig()
+	cfg := DefaultServerConfig()
 	cfg.Token = "token"
 	p := newServerPool(cfg.Token, cfg)
 

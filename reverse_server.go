@@ -1,4 +1,4 @@
-package server
+package xtunnel
 
 import (
 	"context"
@@ -10,7 +10,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
-	"github.com/v2up-32mb/xtunnel"
 	"github.com/v2up-32mb/xtunnel/protocol"
 )
 
@@ -39,7 +38,7 @@ type ServerReverseConn struct {
 }
 
 func newServerReverseConn(connID, clientID, target string) *ServerReverseConn {
-	appEnd, tunEnd := xtunnel.NewBufferedPipe()
+	appEnd, tunEnd := NewBufferedPipe()
 	return &ServerReverseConn{
 		connID:        connID,
 		target:        target,

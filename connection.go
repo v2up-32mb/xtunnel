@@ -1,4 +1,4 @@
-package server
+package xtunnel
 
 import (
 	"encoding/binary"

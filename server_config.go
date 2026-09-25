@@ -1,4 +1,4 @@
-package server
+package xtunnel
 
 import (
 	"errors"
@@ -16,8 +16,8 @@ var (
 	ErrServerAlreadyClosed = errors.New("server already closed")
 )
 
-// Config 服务端配置
-type Config struct {
+// ServerConfig 服务端配置
+type ServerConfig struct {
 	// 监听配置
 	ListenAddr string // HTTPS 监听地址 (如 :8443)
 	Token      string // 认证令牌（WebSocket Subprotocol）
@@ -49,8 +49,8 @@ type Config struct {
 }
 
 // DefaultConfig 返回带有合理默认值的配置
-func DefaultConfig() *Config {
-	return &Config{
+func DefaultServerConfig() *ServerConfig {
+	return &ServerConfig{
 		ListenAddr:             ":8443",
 		Token:                  "",
 		AutoCert:               true,
@@ -68,7 +68,7 @@ func DefaultConfig() *Config {
 }
 
 // Validate 验证配置
-func (c *Config) Validate() error {
+func (c *ServerConfig) Validate() error {
 	if c.ListenAddr == "" {
 		return ErrInvalidListenAddr
 	}

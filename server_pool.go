@@ -1,4 +1,4 @@
-package server
+package xtunnel
 
 import (
 	"fmt"
@@ -30,7 +30,7 @@ func (p *serverPool) allocClientChIDLocked(clientID string) int {
 
 // serverPool 服务端连接池
 type serverPool struct {
-	config        *Config
+	config        *ServerConfig
 	token         string
 	mu            sync.RWMutex
 	bytesSent     uint64
@@ -68,7 +68,7 @@ type serverPool struct {
 }
 
 // newServerPool 创建新的服务端连接池
-func newServerPool(token string, config *Config) *serverPool {
+func newServerPool(token string, config *ServerConfig) *serverPool {
 	limit := int64(config.BackpressureLimitBytes)
 	if limit <= 0 {
 		limit = 32 << 20 // 默认 32MB

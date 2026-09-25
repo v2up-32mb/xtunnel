@@ -61,3 +61,10 @@ func coreLog(level LogLevel, module, format string, args ...any) {
 func CoreLog(level LogLevel, module, format string, args ...any) {
 	coreLog(level, module, format, args...)
 }
+
+// srvLog 服务端组件统一日志入口（合并自原 server 子包）：
+// module 加 "server." 命名空间前缀，与客户端模块（"pool"/"pair_warmer"/...）区分，
+// 便于壳按模块路由过滤；底层走同一套 CoreLog 钩子。
+func srvLog(level LogLevel, module, format string, args ...any) {
+	coreLog(level, "server."+module, format, args...)
+}

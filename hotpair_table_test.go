@@ -1,4 +1,4 @@
-package server
+package xtunnel
 
 import (
 	"context"
@@ -16,7 +16,7 @@ import (
 // newWarmTestServer 构建启用 Hot Pair 的测试服务端 + 双通道假客户端
 func newWarmTestServer(t *testing.T) (*serverPool, *httptest.Server, *websocket.Conn, *websocket.Conn, func()) {
 	t.Helper()
-	cfg := DefaultConfig()
+	cfg := DefaultServerConfig()
 	cfg.Token = "token"
 	p := newServerPool(cfg.Token, cfg)
 

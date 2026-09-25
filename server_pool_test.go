@@ -1,4 +1,4 @@
-package server
+package xtunnel
 
 import (
 	"encoding/binary"
@@ -17,7 +17,7 @@ import (
 
 func newTestServerPool() *serverPool {
 	return &serverPool{
-		config:            DefaultConfig(),
+		config:            DefaultServerConfig(),
 		conns:             make(map[string]*ServerConnState),
 		wsConns:           make([]*ServerWSConn, 0),
 		clientChConns:     make(map[string]map[int]*ServerWSConn),
@@ -109,7 +109,7 @@ func TestServerWSConnCloseClosesBufferedWriteChan(t *testing.T) {
 	defer cleanup()
 
 	p := &serverPool{
-		config:        &Config{WriteTimeout: time.Second},
+		config:        &ServerConfig{WriteTimeout: time.Second},
 		conns:         make(map[string]*ServerConnState),
 		wsConns:       make([]*ServerWSConn, 1),
 		clientChConns: make(map[string]map[int]*ServerWSConn),
@@ -156,7 +156,7 @@ func TestServerWSConnCloseClosesBufferedWriteChan(t *testing.T) {
 
 func TestAsyncWriteQueueFullDoesNotTriggerBackpressureState(t *testing.T) {
 	p := &serverPool{
-		config:            &Config{ReadBufferSize: 8},
+		config:            &ServerConfig{ReadBufferSize: 8},
 		conns:             make(map[string]*ServerConnState),
 		clientChConns:     make(map[string]map[int]*ServerWSConn),
 		globalQueueLimit:  8,
@@ -183,7 +183,7 @@ func TestAsyncWriteQueueFullDoesNotTriggerBackpressureState(t *testing.T) {
 
 func TestAsyncWriteHighWaterReturnsPromptly(t *testing.T) {
 	p := &serverPool{
-		config:            &Config{ReadBufferSize: 8},
+		config:            &ServerConfig{ReadBufferSize: 8},
 		conns:             make(map[string]*ServerConnState),
 		wsConns:           make([]*ServerWSConn, 1),
 		clientChConns:     make(map[string]map[int]*ServerWSConn),
@@ -218,7 +218,7 @@ func TestAsyncWriteHighWaterReturnsPromptly(t *testing.T) {
 
 func TestBroadcastBackpressureSkipsSaturatedChannel(t *testing.T) {
 	p := &serverPool{
-		config:            &Config{ReadBufferSize: 8},
+		config:            &ServerConfig{ReadBufferSize: 8},
 		conns:             make(map[string]*ServerConnState),
 		wsConns:           make([]*ServerWSConn, 1),
 		clientChConns:     make(map[string]map[int]*ServerWSConn),
@@ -308,7 +308,7 @@ func TestBroadcastWriteRemainsGlobalAcrossClients(t *testing.T) {
 }
 
 func TestHandleWebSocketRejectsWhenMaxTotalChannelsReached(t *testing.T) {
-	cfg := DefaultConfig()
+	cfg := DefaultServerConfig()
 	cfg.MaxTotalChannels = 1
 	p := newServerPool("token", cfg)
 	p.wsConns = []*ServerWSConn{{chID: 1, clientID: "client-a", pool: p}}
@@ -332,7 +332,7 @@ func TestHandleWebSocketRejectsWhenMaxTotalChannelsReached(t *testing.T) {
 }
 
 func TestHandleWebSocketRejectsWhenMaxChannelsPerClientReached(t *testing.T) {
-	cfg := DefaultConfig()
+	cfg := DefaultServerConfig()
 	cfg.MaxChannelsPerClient = 1
 	p := newServerPool("token", cfg)
 	p.wsConns = []*ServerWSConn{{chID: 1, clientID: "client-a", pool: p}}
@@ -385,7 +385,7 @@ func TestSendDownlinkAfterSelectionOnlyTargetsChosenChannel(t *testing.T) {
 
 func TestHandleUDPConnectFirstChannelWins(t *testing.T) {
 	p := &serverPool{
-		config:            DefaultConfig(),
+		config:            DefaultServerConfig(),
 		conns:             make(map[string]*ServerConnState),
 		wsConns:           make([]*ServerWSConn, 2),
 		clientChConns:     make(map[string]map[int]*ServerWSConn),
@@ -434,7 +434,7 @@ func TestHandleUDPConnectFirstChannelWins(t *testing.T) {
 
 func TestServerStatsCountSentBytesFromAsyncWrite(t *testing.T) {
 	p := &serverPool{
-		config:        &Config{WriteTimeout: time.Second},
+		config:        &ServerConfig{WriteTimeout: time.Second},
 		conns:         make(map[string]*ServerConnState),
 		wsConns:       make([]*ServerWSConn, 1),
 		clientChConns: make(map[string]map[int]*ServerWSConn),
@@ -693,7 +693,7 @@ func newServerTestWebSocketConn(t *testing.T) (*websocket.Conn, func()) {
 }
 
 func TestHandleTCPConnectUsesRemoteAddrForClientAddr(t *testing.T) {
-	cfg := DefaultConfig()
+	cfg := DefaultServerConfig()
 	cfg.Token = "token"
 	p := newServerPool(cfg.Token, cfg)
 

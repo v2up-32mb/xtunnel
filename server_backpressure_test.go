@@ -1,4 +1,4 @@
-package server
+package xtunnel
 
 import (
 	"sync/atomic"
@@ -8,7 +8,7 @@ import (
 )
 
 func TestBackpressureStateTransitions(t *testing.T) {
-	cfg := DefaultConfig()
+	cfg := DefaultServerConfig()
 	cfg.ReadBufferSize = 64 * 1024
 	cfg.BackpressureLimitBytes = int(cfg.ReadBufferSize) * 8 // 测试中显式使用旧默认值
 
@@ -60,7 +60,7 @@ func TestBackpressureStateTransitions(t *testing.T) {
 }
 
 func TestBackpressureThresholds(t *testing.T) {
-	cfg := DefaultConfig()
+	cfg := DefaultServerConfig()
 	cfg.ReadBufferSize = 64 * 1024 // 64KB
 	cfg.BackpressureLimitBytes = int(cfg.ReadBufferSize) * 8
 
