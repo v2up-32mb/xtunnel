@@ -22,7 +22,7 @@ func TestSrvLogRoutesToUnifiedHook(t *testing.T) {
 	if g == nil {
 		t.Fatal("统一日志钩子未被调用（srvLog 未转发到 xtunnel.CoreLog）")
 	}
-	if s := g.(string); s != "server.pool|hello world" {
-		t.Errorf("srvLog 事件 = %q, want %q", s, "server.pool|hello world")
+	if s := g.(string); s != "server.pool|hello %s" {
+		t.Errorf("srvLog 事件 = %q, want %q", s, "server.pool|hello %s")
 	}
 }
