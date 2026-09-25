@@ -60,6 +60,10 @@ type serverPool struct {
 	// prebindTTL 预绑定状态短存活窗口（默认 prebindStateTTL，测试可覆盖）
 	prebindTTL time.Duration
 
+	// prebindArmed 显式预绑定轮次 armed（B 方案）：clientID -> armed 窗口到期时间。
+	// 收到 MsgHotPairBegin 时置位；旧客户端不发送则走 prebindTTL 兜底。
+	prebindArmed map[string]time.Time
+
 	// 背压控制
 	globalQueueBytes     int64 // 全局队列字节数
 	globalQueueLimit     int64 // 全局队列字节限制
@@ -81,6 +85,7 @@ func newServerPool(token string, config *ServerConfig) *serverPool {
 		clientChConns:     make(map[string]map[int]*ServerWSConn),
 		revConns:          make(map[string]*ServerReverseConn),
 		prebindTTL:        prebindStateTTL,
+		prebindArmed:      make(map[string]time.Time),
 		globalQueueLimit:  limit,
 		backpressureState: int32(protocol.BackpressureNormal),
 	}
@@ -204,7 +209,9 @@ func (p *serverPool) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	p.wsConns = append(p.wsConns, wsConn)
 	p.mu.Unlock()
 
-	srvLog(LevelInfo, "pool", "[服务端] 通道 %d 已连接, 客户端: %s", chID, clientID)
+	srvLogD(LevelInfo, "pool", "[服务端] 通道 %d 已连接, 客户端: %s",
+		[]any{chID, clientID},
+		&DomainEvent{Type: DomainPool, Payload: PoolEvent{Event: "channel_up", ClientID: clientID, ChID: chID}})
 
 	// 启动写入协程
 	wsConn.start()
@@ -212,7 +219,9 @@ func (p *serverPool) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	// 启动读取循环
 	wsConn.readLoop()
 
-	srvLog(LevelInfo, "pool", "[服务端] 通道 %d 已断开", chID)
+	srvLogD(LevelInfo, "pool", "[服务端] 通道 %d 已断开",
+		[]any{chID},
+		&DomainEvent{Type: DomainPool, Payload: PoolEvent{Event: "channel_down", ChID: chID}})
 }
 
 func (p *serverPool) countActiveChannels(clientID string) (total int, clientTotal int) {
@@ -316,6 +325,9 @@ func (p *serverPool) handleMessage(clientID string, chID int, rawLen int, msgTyp
 
 	case protocol.MsgPrebindRequest:
 		p.handlePrebindRequest(clientID, chID, connID, meta)
+
+	case protocol.MsgHotPairBegin:
+		p.handleHotPairBegin(clientID)
 
 	case protocol.MsgUDPConnect:
 		p.handleUDPConnect(clientID, chID, connID, meta)
@@ -528,8 +540,9 @@ func (p *serverPool) unregisterConn(connID string) {
 		d = fmt.Sprintf("%d", down)
 	}
 
-	srvLog(LevelInfo, "pool", "[服务端] %s 访问: %s, 通道: TX %s RX %s, ID:%s, 已关闭",
-		clientAddr, target, u, d, protocol.ShortID(connID))
+	srvLogD(LevelInfo, "pool", "[服务端] %s 访问: %s, 通道: TX %s RX %s, ID:%s, 已关闭",
+		[]any{clientAddr, target, u, d, protocol.ShortID(connID)},
+		&DomainEvent{Type: DomainConn, Payload: ConnEvent{Event: "closed", Client: clientAddr, Target: target}})
 }
 
 // Shutdown 主动关闭所有活跃 WebSocket 通道，向客户端发送 Close Frame。
@@ -599,7 +612,9 @@ func (p *serverPool) updateBackpressureState(newSize int64) {
 		if protocol.BackpressureState(atomic.LoadInt32(&p.backpressureState)) != protocol.BackpressurePause {
 			atomic.StoreInt32(&p.backpressureState, int32(protocol.BackpressurePause))
 			p.broadcastBackpressure(protocol.BackpressurePause)
-			srvLog(LevelWarn, "pool", "[服务端] 背压通知: 暂停 (队列: %d/%d bytes, %.1f%%)", newSize, limit, float64(newSize)*100/float64(limit))
+			srvLogD(LevelWarn, "pool", "[服务端] 背压通知: 暂停 (队列: %d/%d bytes, %.1f%%)",
+				[]any{newSize, limit, float64(newSize) * 100 / float64(limit)},
+				&DomainEvent{Type: DomainPool, Payload: PoolEvent{Event: "backpressure", Detail: "pause"}})
 		}
 		return
 	}
@@ -610,7 +625,9 @@ func (p *serverPool) updateBackpressureState(newSize int64) {
 			if atomic.CompareAndSwapInt32(&p.backpressureCooldown, 0, 1) {
 				atomic.StoreInt32(&p.backpressureState, int32(protocol.BackpressureSlowDown))
 				p.broadcastBackpressure(protocol.BackpressureSlowDown)
-				srvLog(LevelWarn, "pool", "[服务端] 背压通知: 减速 (队列: %d/%d bytes, %.1f%%)", newSize, limit, float64(newSize)*100/float64(limit))
+				srvLogD(LevelWarn, "pool", "[服务端] 背压通知: 减速 (队列: %d/%d bytes, %.1f%%)",
+					[]any{newSize, limit, float64(newSize) * 100 / float64(limit)},
+					&DomainEvent{Type: DomainPool, Payload: PoolEvent{Event: "backpressure", Detail: "slow"}})
 				go func() {
 					time.Sleep(1 * time.Second)
 					atomic.StoreInt32(&p.backpressureCooldown, 0)
@@ -644,7 +661,9 @@ func (p *serverPool) removeQueueBytes(size int) {
 	if currentState == protocol.BackpressurePause && newSize < limit*3/10 {
 		atomic.StoreInt32(&p.backpressureState, int32(protocol.BackpressureNormal))
 		p.broadcastBackpressure(protocol.BackpressureNormal)
-		srvLog(LevelInfo, "pool", "[服务端] 背压通知: 直接恢复正常 (队列: %d/%d bytes, %.1f%%)", newSize, limit, float64(newSize)*100/float64(limit))
+		srvLogD(LevelInfo, "pool", "[服务端] 背压通知: 直接恢复正常 (队列: %d/%d bytes, %.1f%%)",
+			[]any{newSize, limit, float64(newSize) * 100 / float64(limit)},
+			&DomainEvent{Type: DomainPool, Payload: PoolEvent{Event: "backpressure", Detail: "recover"}})
 		return
 	}
 
@@ -652,7 +671,9 @@ func (p *serverPool) removeQueueBytes(size int) {
 	if currentState == protocol.BackpressurePause && newSize < limit*9/10 {
 		atomic.StoreInt32(&p.backpressureState, int32(protocol.BackpressureSlowDown))
 		p.broadcastBackpressure(protocol.BackpressureSlowDown)
-		srvLog(LevelInfo, "pool", "[服务端] 背压通知: 从暂停恢复到减速 (队列: %d/%d bytes, %.1f%%)", newSize, limit, float64(newSize)*100/float64(limit))
+		srvLogD(LevelInfo, "pool", "[服务端] 背压通知: 从暂停恢复到减速 (队列: %d/%d bytes, %.1f%%)",
+			[]any{newSize, limit, float64(newSize) * 100 / float64(limit)},
+			&DomainEvent{Type: DomainPool, Payload: PoolEvent{Event: "backpressure", Detail: "recover_slow"}})
 		return
 	}
 
@@ -660,7 +681,9 @@ func (p *serverPool) removeQueueBytes(size int) {
 	if currentState == protocol.BackpressureSlowDown && newSize < limit*7/10 {
 		atomic.StoreInt32(&p.backpressureState, int32(protocol.BackpressureNormal))
 		p.broadcastBackpressure(protocol.BackpressureNormal)
-		srvLog(LevelInfo, "pool", "[服务端] 背压通知: 恢复正常 (队列: %d/%d bytes, %.1f%%)", newSize, limit, float64(newSize)*100/float64(limit))
+		srvLogD(LevelInfo, "pool", "[服务端] 背压通知: 恢复正常 (队列: %d/%d bytes, %.1f%%)",
+			[]any{newSize, limit, float64(newSize) * 100 / float64(limit)},
+			&DomainEvent{Type: DomainPool, Payload: PoolEvent{Event: "backpressure", Detail: "recover"}})
 		return
 	}
 }

@@ -19,6 +19,48 @@ const (
 	LevelError
 )
 
+// DomainEventType 结构化领域事件类型（方向 2）：事件自带结构化负载，
+// 壳可据此做统计/过滤/路由，无需解析字符串。
+type DomainEventType string
+
+const (
+	DomainConn    DomainEventType = "conn"    // 连接事件（建立/关闭）
+	DomainHotPair DomainEventType = "hotpair" // Hot Pair 事件（提升/回退/建表）
+	DomainPool    DomainEventType = "pool"    // 池事件（通道上下线/背压档位）
+)
+
+// DomainEvent 结构化领域事件负载（可选）：挂载在 LogEvent.Domain 上。
+type DomainEvent struct {
+	Type    DomainEventType
+	Payload any
+}
+
+// 领域事件结构化负载
+
+// ConnEvent 连接事件负载：Event 为 "established"/"closed"
+type ConnEvent struct {
+	Event      string // established / closed
+	Client     string // 客户端标识
+	Target     string // 目标地址
+	UplinkCh   int    // 上行通道（closed 时可能为 0）
+	DownlinkCh int    // 下行通道（正向建立后才有）
+}
+
+// HotPairEvent 事件负载：Event 为 "promoted"/"fallback"/"bound"
+type HotPairEvent struct {
+	Event    string // promoted / fallback / bound
+	Key      string // 预热键（prebind-...）
+	ChA, ChB int    // 双端通道
+}
+
+// PoolEvent 池事件负载：Event 为 "channel_up"/"channel_down"/"backpressure"
+type PoolEvent struct {
+	Event    string // channel_up / channel_down / backpressure
+	ClientID string
+	ChID     int
+	Detail   string // 背压档位描述（backpressure 时用）
+}
+
 // LogEvent 一条库内日志事件
 type LogEvent struct {
 	Level  LogLevel
@@ -26,6 +68,10 @@ type LogEvent struct {
 	Time   time.Time
 	Format string
 	Args   []any
+
+	// Domain 可选结构化领域负载（方向 2）：nil 表示纯字符串日志。
+	// 壳优先消费 Domain（结构化），退路是按 Format/Args 渲染。
+	Domain *DomainEvent
 }
 
 type logHookFunc func(LogEvent)
@@ -51,9 +97,14 @@ func SetLogf(fn func(ev LogEvent)) {
 	coreLogHook.Store(logHookFunc(fn))
 }
 
+// coreLogD 带结构化领域负载的统一日志入口；domain 为 nil 等价于纯日志。
+func coreLogD(level LogLevel, module, format string, args []any, domain *DomainEvent) {
+	coreLogHook.Load().(logHookFunc)(LogEvent{Level: level, Module: module, Time: time.Now(), Format: format, Args: args, Domain: domain})
+}
+
 // coreLog 库内统一日志入口（带等级与模块元数据）
 func coreLog(level LogLevel, module, format string, args ...any) {
-	coreLogHook.Load().(logHookFunc)(LogEvent{Level: level, Module: module, Time: time.Now(), Format: format, Args: args})
+	coreLogD(level, module, format, args, nil)
 }
 
 // CoreLog 统一的公开日志入口（与 SetLogf 同一套事件体系）。
@@ -67,4 +118,9 @@ func CoreLog(level LogLevel, module, format string, args ...any) {
 // 便于壳按模块路由过滤；底层走同一套 CoreLog 钩子。
 func srvLog(level LogLevel, module, format string, args ...any) {
 	coreLog(level, "server."+module, format, args...)
+}
+
+// srvLogD 服务端带结构化领域负载的日志入口（方向 2）。
+func srvLogD(level LogLevel, module, format string, args []any, domain *DomainEvent) {
+	coreLogD(level, "server."+module, format, args, domain)
 }

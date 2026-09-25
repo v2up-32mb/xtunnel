@@ -70,14 +70,17 @@ func (p *serverPool) handleTCPConnect(clientID string, chID int, connID string, 
 					st.downlinkChID = e.ChB
 					st.mu.Unlock()
 					promoted = true
-					srvLog(LevelInfo, "handler", "[服务端] %s 访问: %s, 通道: TX %d RX %d (预热 Pair 提升, 键:%s), ID:%s",
-						st.clientAddr, target, chID, e.ChB, protocol.ShortID(e.Key), protocol.ShortID(connID))
+					srvLogD(LevelInfo, "handler", "[服务端] %s 访问: %s, 通道: TX %d RX %d (预热 Pair 提升, 键:%s), ID:%s",
+						[]any{st.clientAddr, target, chID, e.ChB, protocol.ShortID(e.Key), protocol.ShortID(connID)},
+						&DomainEvent{Type: DomainHotPair, Payload: HotPairEvent{Event: "promoted", Key: e.Key, ChA: chID, ChB: e.ChB}})
 				}
 			}
 		}
 		if !promoted {
 			_ = p.sendDownlink(connID, protocol.MsgSelectUplink, uplinkChIDBytes, nil)
-			srvLog(LevelInfo, "handler", "[服务端] %s 访问: %s, 通道: TX %d, ID:%s", st.clientAddr, target, chID, protocol.ShortID(connID))
+			srvLogD(LevelInfo, "handler", "[服务端] %s 访问: %s, 通道: TX %d, ID:%s",
+				[]any{st.clientAddr, target, chID, protocol.ShortID(connID)},
+				&DomainEvent{Type: DomainConn, Payload: ConnEvent{Event: "established", Client: st.clientAddr, Target: target, UplinkCh: chID}})
 		}
 
 		// 异步连接目标服务器
@@ -258,6 +261,18 @@ func (p *serverPool) handleTCPClose(chID int, connID string) {
 	p.unregisterConn(connID)
 }
 
+// handleHotPairBegin 处理显式预绑定轮次开始(B 方案):为客户端置 armed 窗口。
+// 窗口由 prebindTTL 控制;旧客户端不发送 Begin 则无 armed,服务端回退 5s 兜底。
+func (p *serverPool) handleHotPairBegin(clientID string) {
+	ttl := p.prebindTTL
+	if ttl <= 0 {
+		ttl = prebindStateTTL
+	}
+	p.mu.Lock()
+	p.prebindArmed[clientID] = time.Now().Add(ttl)
+	p.mu.Unlock()
+}
+
 // handlePrebindRequest 处理预绑定请求
 func (p *serverPool) handlePrebindRequest(clientID string, chID int, connID string, meta []byte) {
 	if len(meta) < 1 {
@@ -307,6 +322,15 @@ func (p *serverPool) handlePrebindRequest(clientID string, chID int, connID stri
 	if ttl <= 0 {
 		ttl = prebindStateTTL
 	}
+	// B 方案：显式 Begin 的客户端窗口从 armed 起算（不依赖帧到达后的 5s），
+	// armed 剩余更长时优先；无 Begin 的旧客户端保持原 5s 兜底。
+	p.mu.RLock()
+	if armedUntil, ok := p.prebindArmed[inboundClientID]; ok {
+		if rem := time.Until(armedUntil); rem > ttl {
+			ttl = rem
+		}
+	}
+	p.mu.RUnlock()
 	time.AfterFunc(ttl, func() {
 		p.unregisterConn(connIDCopy)
 	})

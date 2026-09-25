@@ -31,6 +31,7 @@ const (
 	MsgReverseListen       MessageType = 0x20 // 客户端→服务端：请求服务端开启反向监听，meta=监听参数值原文（如 socks5://user:pass@0.0.0.0:30000），connID=监听器 ID
 	MsgReverseListenResult MessageType = 0x21 // 服务端→客户端：监听注册结果，meta[0]=状态(ConnStatus)，meta[1:]=失败原因文本
 	MsgHotPairNotify       MessageType = 0x22 // 客户端→服务端：批量预热通道对通知（健康维护由客户端负责），payload 为 HotPairInfo 记录序列
+	MsgHotPairBegin        MessageType = 0x23 // 客户端→服务端：显式预绑定轮次开始（B 方案 armed）；服务端收到后在 armed 窗口内接受同轮 prebind，旧客户端无 Begin 时回退 5s 窗口
 )
 
 // ======================== HotPair 预热通道对 ========================

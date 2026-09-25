@@ -277,6 +277,13 @@ func (w *PairWarmer) BuildPair(available []int) (*HotChannelPair, error) {
 
 	msg := protocol.EncodeMessage(protocol.MsgPrebindRequest, connID, meta, nil)
 
+	// B 方案：广播前先发显式 MsgHotPairBegin，服务端 armed（窗口从 Begin 起算，
+	// 不依赖帧到达后的 5s）；旧服务端忽略该消息，兼容。
+	beginMsg := protocol.EncodeMessage(protocol.MsgHotPairBegin, "", nil, nil)
+	for _, chID := range available {
+		_ = w.pool.asyncWriteDirect(chID, websocket.BinaryMessage, beginMsg)
+	}
+
 	// 广播到可用通道
 	sent := 0
 	for _, chID := range available {

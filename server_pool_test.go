@@ -22,6 +22,7 @@ func newTestServerPool() *serverPool {
 		wsConns:           make([]*ServerWSConn, 0),
 		clientChConns:     make(map[string]map[int]*ServerWSConn),
 		prebindTTL:        100 * time.Millisecond,
+		prebindArmed:      make(map[string]time.Time),
 		globalQueueLimit:  1024,
 		backpressureState: int32(protocol.BackpressureNormal),
 	}
@@ -752,5 +753,57 @@ func TestPrebindDuplicatesIgnoredFirstArrivalWins(t *testing.T) {
 	p.mu.RUnlock()
 	if exists {
 		t.Fatal("prebind state should be cleaned after TTL")
+	}
+}
+
+// TestHotPairBeginArmsWindowThenSingleBroadcast B 方案：显式 MsgHotPairBegin 置 armed，
+// 窗口从 Begin 起算；armed 内同 connID 重复 prebind 依旧只广播一次（首帧定上行）。
+func TestHotPairBeginArmsWindowThenSingleBroadcast(t *testing.T) {
+	p := newTestServerPool()
+	meta := []byte{0}
+	meta = append(meta, protocol.PrebindTarget...)
+	connID := "prebind-begin-1"
+
+	// 客户端先发 Begin（armed），随后并行 prebind 帧
+	p.handleMessage("client-a", 1, 10, protocol.MsgHotPairBegin, "", nil, nil)
+	p.handleMessage("client-a", 1, 10, protocol.MsgPrebindRequest, connID, meta, nil)
+	p.handleMessage("client-a", 20, 10, protocol.MsgPrebindRequest, connID, meta, nil)
+	p.handleMessage("client-a", 30, 10, protocol.MsgPrebindRequest, connID, meta, nil)
+
+	p.mu.RLock()
+	st := p.conns[connID]
+	p.mu.RUnlock()
+	if st == nil {
+		t.Fatal("armed 后首帧应建立 prebind state")
+	}
+	if st.uplinkChID != 1 {
+		t.Fatalf("首帧应定上行通道 1, got %d", st.uplinkChID)
+	}
+
+	// 状态在 armed 窗口内保留(100ms TTL 从 Begin 起算)
+	time.Sleep(120 * time.Millisecond)
+	p.mu.RLock()
+	_, exists := p.conns[connID]
+	p.mu.RUnlock()
+	if exists {
+		t.Fatal("armed 窗口到期后应清理 prebind state")
+	}
+}
+
+// TestHotPairBeginOldClientNoBeginFallsBack B 方案兼容：旧客户端不发 Begin 直接 prebind，
+// 行为与原有 5s(测试 100ms) 窗口一致。
+func TestHotPairBeginOldClientNoBeginFallsBack(t *testing.T) {
+	p := newTestServerPool()
+	meta := []byte{0}
+	meta = append(meta, protocol.PrebindTarget...)
+	connID := "prebind-old-1"
+
+	p.handleMessage("client-old", 1, 10, protocol.MsgPrebindRequest, connID, meta, nil)
+
+	p.mu.RLock()
+	st := p.conns[connID]
+	p.mu.RUnlock()
+	if st == nil || st.uplinkChID != 1 {
+		t.Fatal("无 Begin 旧客户端: 首帧应照常定上行")
 	}
 }

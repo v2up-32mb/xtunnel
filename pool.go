@@ -984,12 +984,16 @@ func (p *clientPool) registerAndBroadcastTCPWithPair(connID, target string, firs
 		}
 		p.mu.Unlock()
 		msg := protocol.EncodeMessage(protocol.MsgTCPConnect, connID, meta, first)
-		coreLog(LevelInfo, "pool", "[客户端] %s 使用 Hot Pair %s (键:%s TX %d RX %d) 单播拨号，ID:%s", reqType, pair.ID, protocol.ShortID(pair.PrebindID), pair.UplinkChID, pair.DownlinkChID, protocol.ShortID(connID))
+		coreLogD(LevelInfo, "pool", "[客户端] %s 使用 Hot Pair %s (键:%s TX %d RX %d) 单播拨号，ID:%s",
+			[]any{reqType, pair.ID, protocol.ShortID(pair.PrebindID), pair.UplinkChID, pair.DownlinkChID, protocol.ShortID(connID)},
+			&DomainEvent{Type: DomainHotPair, Payload: HotPairEvent{Event: "promoted", Key: pair.PrebindID, ChA: pair.UplinkChID, ChB: pair.DownlinkChID}})
 		if err := p.asyncWriteDirect(pair.UplinkChID, websocket.BinaryMessage, msg); err == nil {
 			return
 		}
 		// 热路径发送失败：清预置状态，释放 Pair 并废弃该通道，回退广播
-		coreLog(LevelWarn, "pool", "[客户端] %s Hot Pair 上行通道 %d 发送失败，回退广播，ID:%s", reqType, pair.UplinkChID, protocol.ShortID(connID))
+		coreLogD(LevelWarn, "pool", "[客户端] %s Hot Pair 上行通道 %d 发送失败，回退广播，ID:%s",
+			[]any{reqType, pair.UplinkChID, protocol.ShortID(connID)},
+			&DomainEvent{Type: DomainHotPair, Payload: HotPairEvent{Event: "fallback", Key: pair.PrebindID, ChA: pair.UplinkChID}})
 		p.mu.Lock()
 		if st = p.conns[connID]; st != nil {
 			st.pair = nil
