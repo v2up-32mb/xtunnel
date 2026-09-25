@@ -422,6 +422,7 @@ func (p *serverPool) cleanupChannel(clientID string, chID int) {
 		if len(m) == 0 {
 			delete(p.clientChConns, clientID)
 			clientGone = true
+			delete(p.prebindArmed, clientID) // 锁内回收 armed 条目,防无界增长(与 handleHotPairBegin 同锁)
 		}
 	}
 	for i, wc := range p.wsConns {
@@ -542,7 +543,7 @@ func (p *serverPool) unregisterConn(connID string) {
 
 	srvLogD(LevelInfo, "pool", "[服务端] %s 访问: %s, 通道: TX %s RX %s, ID:%s, 已关闭",
 		[]any{clientAddr, target, u, d, protocol.ShortID(connID)},
-		&DomainEvent{Type: DomainConn, Payload: ConnEvent{Event: "closed", Client: clientAddr, Target: target}})
+		&DomainEvent{Type: DomainConn, Payload: ConnEvent{Event: "closed", Client: clientAddr, Target: target, UplinkCh: up, DownlinkCh: down}})
 }
 
 // Shutdown 主动关闭所有活跃 WebSocket 通道，向客户端发送 Close Frame。

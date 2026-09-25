@@ -322,11 +322,11 @@ func (p *serverPool) handlePrebindRequest(clientID string, chID int, connID stri
 	if ttl <= 0 {
 		ttl = prebindStateTTL
 	}
-	// B 方案：显式 Begin 的客户端窗口从 armed 起算（不依赖帧到达后的 5s），
-	// armed 剩余更长时优先；无 Begin 的旧客户端保持原 5s 兜底。
+	// B 方案：显式 Begin 的客户端窗口从 Begin 锚定（unregister 时刻 = Begin + TTL，
+	// 不再依赖"帧到达后 TTL"）；armed 已过期或旧客户端无 Begin 时回退 prebindTTL。
 	p.mu.RLock()
 	if armedUntil, ok := p.prebindArmed[inboundClientID]; ok {
-		if rem := time.Until(armedUntil); rem > ttl {
+		if rem := time.Until(armedUntil); rem > 0 {
 			ttl = rem
 		}
 	}

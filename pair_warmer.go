@@ -281,7 +281,9 @@ func (w *PairWarmer) BuildPair(available []int) (*HotChannelPair, error) {
 	// 不依赖帧到达后的 5s）；旧服务端忽略该消息，兼容。
 	beginMsg := protocol.EncodeMessage(protocol.MsgHotPairBegin, "", nil, nil)
 	for _, chID := range available {
-		_ = w.pool.asyncWriteDirect(chID, websocket.BinaryMessage, beginMsg)
+		if err := w.pool.asyncWriteDirect(chID, websocket.BinaryMessage, beginMsg); err != nil {
+			coreLog(LevelDebug, "pair_warmer", "[PairWarmer] 预绑定 Begin 发送到通道 %d 失败: %v", chID, err)
+		}
 	}
 
 	// 广播到可用通道

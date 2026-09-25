@@ -80,3 +80,18 @@ func TestHotPairConnIDEmptyArgs(t *testing.T) {
 		t.Fatal("expected empty result for empty args")
 	}
 }
+
+// TestEncodeDecodeHotPairBegin P2-5: 0x23 Begin 帧(空 connID/空 payload)编解码回环,不报错
+func TestEncodeDecodeHotPairBegin(t *testing.T) {
+	raw := EncodeMessage(MsgHotPairBegin, "", nil, nil)
+	mtype, connID, meta, payload, err := DecodeMessage(raw)
+	if err != nil {
+		t.Fatalf("DecodeMessage(Begin) 错误: %v", err)
+	}
+	if mtype != MsgHotPairBegin {
+		t.Errorf("msgType = %v, want MsgHotPairBegin", mtype)
+	}
+	if connID != "" || len(meta) != 0 || len(payload) != 0 {
+		t.Errorf("空 ID/payload 回环失真: id=%q meta=%v payload=%v", connID, meta, payload)
+	}
+}

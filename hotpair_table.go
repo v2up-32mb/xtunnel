@@ -60,6 +60,10 @@ func (t *HotPairTable) HandleNotify(clientID string, payload []byte) {
 			continue
 		}
 		m[e.Key] = &HotPairEntry{Key: e.Key, ChA: e.ChA, ChB: e.ChB, At: now}
+		// P2-7: HotPair bound 结构化事件（壳可按键聚合建表）
+		srvLogD(LevelDebug, "hotpair_table", "[HotPair] 建表 %s (ChA %d / ChB %d)",
+			[]any{protocol.ShortID(e.Key), e.ChA, e.ChB},
+			&DomainEvent{Type: DomainHotPair, Payload: HotPairEvent{Event: "bound", Key: e.Key, ChA: e.ChA, ChB: e.ChB}})
 	}
 	srvLog(LevelInfo, "hotpair_table", "[HotPair] 收到客户端 %s 预热通道对通知 (%d 条)，在表 %d 条",
 		protocol.ShortID(clientID), len(entries), len(m))

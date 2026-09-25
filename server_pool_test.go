@@ -790,6 +790,51 @@ func TestHotPairBeginArmsWindowThenSingleBroadcast(t *testing.T) {
 	}
 }
 
+// TestHotPairBeginSingleBroadcastPerRound P1-2：armed 轮次内同 connID 多条并行 prebind，
+// MsgSelectUplink 广播必须恰好 1 次（核心保证"每轮 1 次"，此处真数广播）。
+func TestHotPairBeginSingleBroadcastPerRound(t *testing.T) {
+	p := newTestServerPool()
+	p.wsConns = make([]*ServerWSConn, 2)
+	p.wsConns[0] = &ServerWSConn{chID: 1, clientID: "client-a", pool: p, writeChan: make(chan writeTask, 8)}
+	p.wsConns[1] = &ServerWSConn{chID: 2, clientID: "client-a", pool: p, writeChan: make(chan writeTask, 8)}
+	p.clientChConns = map[string]map[int]*ServerWSConn{
+		"client-a": {1: p.wsConns[0], 2: p.wsConns[1]},
+	}
+
+	meta := []byte{0}
+	meta = append(meta, protocol.PrebindTarget...)
+	connID := "prebind-bc-1"
+
+	// Begin → 4 条同 connID 并行 prebind（通道 1/2 交错，模拟竞速广播）
+	p.handleMessage("client-a", 1, 10, protocol.MsgHotPairBegin, "", nil, nil)
+	for _, ch := range []int{1, 2, 2, 1} {
+		p.handleMessage("client-a", ch, 10, protocol.MsgPrebindRequest, connID, meta, nil)
+	}
+
+	// "一次广播" = 向所有活跃通道各发 1 帧。4 条并行 prebind 若每帧都触发广播，
+	// 每通道将收到 4 帧;正确行为是只广播 1 次 → 每通道恰好 1 帧。
+	perCh := make([]int, len(p.wsConns))
+	for i, wc := range p.wsConns {
+		for {
+			select {
+			case task := <-wc.writeChan:
+				mtype, id, _, _, err := protocol.DecodeMessage(task.data)
+				if err == nil && mtype == protocol.MsgSelectUplink && id == connID {
+					perCh[i]++
+				}
+			default:
+				goto drained
+			}
+		}
+	drained:
+	}
+	for i, n := range perCh {
+		if n != 1 {
+			t.Fatalf("armed 轮次内广播应恰好 1 次(每通道 1 帧), 通道[%d] got %d 帧, perCh=%v", i, n, perCh)
+		}
+	}
+}
+
 // TestHotPairBeginOldClientNoBeginFallsBack B 方案兼容：旧客户端不发 Begin 直接 prebind，
 // 行为与原有 5s(测试 100ms) 窗口一致。
 func TestHotPairBeginOldClientNoBeginFallsBack(t *testing.T) {
