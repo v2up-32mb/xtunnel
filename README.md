@@ -13,6 +13,7 @@ x-tunnel 多通道 WebSocket 隧道的 **Go 核心库（模块 `github.com/v2up-
 ## 能力
 
 - **8 字节二进制协议**（`protocol/`）：connID + msgType 帧编解码，多路复用 WebSocket 通道
+  （v0.3.1 起含 `MsgHotPairBegin` 显式预绑定轮次，向后兼容）
 - **连接池**（`pool.go`）：多通道 WebSocket、下行通道选择（selectDownlink 竞争）、
   背压控制（写队列字节上限 + 聚合写 worker）、快重试、统计
 - **代理拨号适配**（`proxy_dialer.go`）：池 → `xshared/dialer` 接口的实现
@@ -63,6 +64,11 @@ cfg.ReverseListeners = []string{"socks5://user:pass@0.0.0.0:30000"} // 绑定地
 xtunnel.SetLogf(func(ev xtunnel.LogEvent) {
     // 按 ev.Level（LevelDebug/Info/Warn/Error）过滤、按 ev.Module（pool/pair_warmer/...）路由
     // ev.Format + ev.Args 为格式化字符串，ev.Time 为事件时间。
+    // 结构化事件（v0.3.1 起）：ev.Domain 非 nil 时携带 Type + 结构化 Payload
+    // （ConnEvent/HotPairEvent/PoolEvent），壳可据此做统计/过滤，无需解析字符串。
+    if ev.Domain != nil {
+        // 例如按状态聚合连接事件: ev.Domain.Type == "conn" -> Payload.(xtunnel.ConnEvent)
+    }
 })
 ```
 

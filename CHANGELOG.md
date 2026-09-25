@@ -3,8 +3,37 @@
 本文件记录 `github.com/v2up-32mb/xtunnel` 各版本的变更与**下游升级指引**。
 版本格式遵循 [语义化版本](https://semver.org/lang/zh-CN/)；`protocol/` 子包的任何变更都单独标注，方便下游评估是否需要同步升级服务端。
 
-> 升级速查：**协议版本 = 0x22（MsgHotPairNotify）**。协议消息集自 v0.2.0 起未再变化；
-> 后续版本均为组件/展示/日志改动，服务端无需跟随升级（除非另行标注）。
+> 升级速查：**协议变更于 v0.3.1 新增 `MsgHotPairBegin`(0x23)**（显式预绑定轮次开始）。
+> 消息集其余部分自 v0.2.0 起未变。协议升级为**向后兼容**：旧服务端忽略 Begin 帧、旧客户端不发送
+> Begin 则由服务端 5s 窗口兜底，无需两端同步升级即可共存。
+
+---
+
+## v0.3.1 — 2026-09-26
+
+**Added（B 方案：显式预绑定轮次）**
+
+- 协议新增 `MsgHotPairBegin`(0x23)（客户端→服务端）：预绑定竞速广播前先发送，服务端置 armed；
+  预绑定状态保留窗口从 Begin 起算，**不再依赖帧到达后的 5s 定时窗口**。
+- 服务端 `handleHotPairBegin` 置 armed；`handlePrebindRequest` 在 armed 剩余更长时优先
+  （否则回退 5s）。**旧客户端无 Begin → 原 5s 兜底；旧服务端忽略 Begin → 兼容**。
+- 客户端 `BuildPair` 广播前先广播 Begin；win7-compat 同步。
+- 新增回归测试：armed 窗口单次广播、旧端兜底。
+
+**Added（方向 2：结构化领域事件）**
+
+- `LogEvent` 新增可选 `Domain *DomainEvent` 字段（`Type` + 结构化 `Payload`），
+  **既有纯字符串日志契约完全兼容**（无 Domain 时 Domain=nil）。
+- 类型：`ConnEvent`（established/closed：Client/Target/通道）、`HotPairEvent`
+  （promoted/fallback/bound：键/双通道）、`PoolEvent`（channel_up/channel_down/backpressure）。
+- 发射入口：`coreLogD`/`srvLogD`（壳用 `SetLogf` 收到 LogEvent 后按 `ev.Domain` 聚合统计，
+  无需解析字符串）。
+- 接入点：服务端连接建立/关闭、HotPair 提升、通道上下线、背压档位；客户端 HotPair 单播/回退。
+
+**升级指引**
+
+- 协议向后兼容，服务端无需两端同步升级；`MsgHotPairBegin` 建议新端先发、旧端自然忽略。
+- 壳可选择性消费 `ev.Domain` 做结构化统计；不消费则照旧按 Format/Args 渲染。
 
 ---
 
