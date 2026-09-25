@@ -41,7 +41,6 @@ func (t *HotPairTable) HandleNotify(clientID string, payload []byte) {
 		return
 	}
 	t.mu.Lock()
-	defer t.mu.Unlock()
 
 	m := t.table[clientID]
 	if m == nil {
@@ -55,18 +54,27 @@ func (t *HotPairTable) HandleNotify(clientID string, payload []byte) {
 			delete(m, k)
 		}
 	}
+	// 收集新建表项（锁内只动表），解锁后在锁外发结构化事件，
+	// 避免同步用户钩子回调阻塞并发 Lookup/HandleNotify
+	var bound []protocol.HotPairInfo
 	for _, e := range entries {
 		if e.Key == "" || e.ChA <= 0 || e.ChB <= 0 {
 			continue
 		}
 		m[e.Key] = &HotPairEntry{Key: e.Key, ChA: e.ChA, ChB: e.ChB, At: now}
-		// P2-7: HotPair bound 结构化事件（壳可按键聚合建表）
+		bound = append(bound, e)
+	}
+	tableSize := len(m)
+	entryCount := len(entries)
+	t.mu.Unlock()
+
+	for _, e := range bound {
 		srvLogD(LevelDebug, "hotpair_table", "[HotPair] 建表 %s (ChA %d / ChB %d)",
 			[]any{protocol.ShortID(e.Key), e.ChA, e.ChB},
 			&DomainEvent{Type: DomainHotPair, Payload: HotPairEvent{Event: "bound", Key: e.Key, ChA: e.ChA, ChB: e.ChB}})
 	}
 	srvLog(LevelInfo, "hotpair_table", "[HotPair] 收到客户端 %s 预热通道对通知 (%d 条)，在表 %d 条",
-		protocol.ShortID(clientID), len(entries), len(m))
+		protocol.ShortID(clientID), entryCount, tableSize)
 }
 
 // Lookup 按键查找表项（正向 handleTCPConnect 提升路径）；过期或不存在返回 nil。

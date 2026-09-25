@@ -15,8 +15,9 @@
 
 - 协议新增 `MsgHotPairBegin`(0x23)（客户端→服务端）：预绑定竞速广播前先发送，服务端置 armed；
   预绑定状态保留窗口从 Begin 起算，**不再依赖帧到达后的 5s 定时窗口**。
-- 服务端 `handleHotPairBegin` 置 armed；`handlePrebindRequest` 在 armed 剩余更长时优先
-  （否则回退 5s）。**旧客户端无 Begin → 原 5s 兜底；旧服务端忽略 Begin → 兼容**。
+- 服务端 `handleHotPairBegin` 置 armed；`handlePrebindRequest` 在 armed 未过期时**直接采用
+  剩余窗口**（unregister 时刻 = Begin + TTL，即使剩余短于 5s），仅当 armed 已过期或
+  旧客户端无 Begin 时回退 5s。**旧客户端无 Begin → 原 5s 兜底；旧服务端忽略 Begin → 兼容**。
 - 客户端 `BuildPair` 广播前先广播 Begin；win7-compat 同步。
 - 新增回归测试：armed 窗口单次广播、旧端兜底。
 
