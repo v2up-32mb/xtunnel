@@ -69,7 +69,7 @@ func (c *Client) Start() error {
 	c.pool.Start(relayNodes)
 
 	c.started = true
-	coreLogf("[客户端] 已启动")
+	coreLog(LevelInfo, "client", "[客户端] 已启动")
 	return nil
 }
 
@@ -96,7 +96,7 @@ func (c *Client) Shutdown() error {
 	c.pool.Shutdown()
 
 	c.started = false
-	coreLogf("[客户端] 已关闭")
+	coreLog(LevelInfo, "client", "[客户端] 已关闭")
 	return nil
 }
 
