@@ -52,6 +52,25 @@ cfg.ReverseListeners = []string{"socks5://user:pass@0.0.0.0:30000"} // 绑定地
 - `github.com/v2up-32mb/xshared`（ECH/DoH/配置/拨号接口）
 - `github.com/gorilla/websocket`、`github.com/google/uuid`
 
+## 日志契约（v0.2.3 起）
+
+核心库**默认静默，不直接输出日志**。需要日志的下游壳须在启动时注入事件回调：
+
+```go
+xtunnel.SetLogf(func(ev xtunnel.LogEvent) {
+    // 按 ev.Level（LevelDebug/Info/Warn/Error）过滤、按 ev.Module（pool/pair_warmer/...）路由
+    // ev.Format + ev.Args 为格式化字符串，ev.Time 为事件时间。
+})
+```
+
+```go
+xtunnel.SetLogf(nil) // 恢复静默
+```
+
+- 约定：诊断/竞速→`LevelDebug`，常规流程→`LevelInfo`，非致命异常→`LevelWarn`，硬失败→`LevelError`。
+- `SetLogf` 可随时调用（原子切换）；注入的 hook 必须并发安全。
+- ⚠️ 破坏性变更：v0.2.2 的 `SetLogf(func(format string, args ...any))` 在 v0.2.3 升级为 `func(LogEvent)`，旧壳需同步适配。
+
 ## 测试
 
 ```bash

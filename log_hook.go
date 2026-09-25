@@ -1,6 +1,9 @@
 package xtunnel
 
-import "time"
+import (
+	"sync/atomic"
+	"time"
+)
 
 // 核心库约定：不直接向 stdout/stderr 输出日志。
 // 所有需要展示的信息统一经 coreLogHook 以 LogEvent 形式交给下游壳处理，
@@ -25,19 +28,30 @@ type LogEvent struct {
 	Args   []any
 }
 
-var coreLogHook = func(LogEvent) {}
+type logHookFunc func(LogEvent)
+
+// coreLogHook 用 atomic.Value 存储，允许运行时安全切换（不影响并发日志调用）。
+var coreLogHook atomic.Value // stores logHookFunc
+
+func init() {
+	coreLogHook.Store(logHookFunc(func(LogEvent) {}))
+}
 
 // SetLogf 由下游壳注入日志事件处理函数；传入 nil 恢复静默。
 // 壳可按 ev.Level / ev.Module 过滤，自行决定目标与格式（控制台/文件/JSON/远端等）。
+// 注意：
+//  1. 可随时调用（原子切换）；建议在启动前注入，以免丢失早期日志；
+//  2. 注入的 hook 实现必须并发安全（coreLog 会从 pool/pair_warmer/relay/reverse 等
+//     多个 goroutine 同时触发）。
 func SetLogf(fn func(ev LogEvent)) {
 	if fn == nil {
-		coreLogHook = func(LogEvent) {}
+		coreLogHook.Store(logHookFunc(func(LogEvent) {}))
 		return
 	}
-	coreLogHook = fn
+	coreLogHook.Store(logHookFunc(fn))
 }
 
 // coreLog 库内统一日志入口（带等级与模块元数据）
 func coreLog(level LogLevel, module, format string, args ...any) {
-	coreLogHook(LogEvent{Level: level, Module: module, Time: time.Now(), Format: format, Args: args})
+	coreLogHook.Load().(logHookFunc)(LogEvent{Level: level, Module: module, Time: time.Now(), Format: format, Args: args})
 }
