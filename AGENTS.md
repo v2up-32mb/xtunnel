@@ -66,6 +66,10 @@
 
 - **目标**：把 `xtunnel-cli` 的 `server/pkg` 迁入本库 `server/` 子包（`package server`）。
 - **前置状态**：✅ 服务端核心日志已收敛为注入钩子（`server.SetLogf`，默认静默，50 处 `srvLog` 带等级/模块），壳已统一 `[等级][模块]`；迁移只差改 import 与包名。
+- **进度**（本批次已推进）：
+  - ✅ 步骤 1-2：`server/` 子包已迁入（commit `6c9d78c`），`go test ./... -race` 全绿；
+  - ✅ 步骤 3 验证：CLI 壳本地 replace 切到本库 `server`，编译/测试/静态二进制构建全通过（`SetLogf` 已就位，零其他改动）；实验后已回退，保持 CLI 服务端原状可运行；
+  - ⏳ 正式切换（步骤 3-4 提交）随 v0.3.0 发布时执行：CLI 删本地 `server/pkg`、go.mod 升版后壳改 import。
 - **步骤**：
   1. 复制 `xtunnel-cli/server/pkg/*.go`（handler/pool/connection/server/reverse/reverse_listener/hotpair_table/config/cert + 测试）→ 本库 `server/`；
   2. import 从 `x-tunnel/server/pkg` 改为 `github.com/v2up-32mb/xtunnel/{protocol,server}`；
