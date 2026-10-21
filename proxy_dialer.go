@@ -93,6 +93,19 @@ func (s *pipeStream) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
+// CloseWrite 实现半关闭（上行结束）：向服务端发送 MsgTCPClose 通知客户端已停止发送，
+// 但保留下行通道继续接收数据，直到服务端也回发 MsgTCPClose 或 pumpTunnel 全关闭。
+// 这使 xshared/socks5 的 pumpTunnel 能通过 closeWriter 接口正确传播半关闭，
+// 避免下行 io.Copy goroutine 因无 EOF 信号而永久阻塞。
+func (s *pipeStream) CloseWrite() error {
+	if chID, ok := s.pool.GetUplinkChannel(s.connID); ok {
+		_ = s.pool.SendCloseDirect(chID, s.connID)
+	} else {
+		s.pool.broadcastWrite(websocketBinary, protocol.EncodeMessage(protocol.MsgTCPClose, s.connID, nil, nil))
+	}
+	return nil
+}
+
 // Close 发送 MsgTCPClose（直发/广播）并注销；重复调用安全。
 func (s *pipeStream) Close() error {
 	s.once.Do(func() {

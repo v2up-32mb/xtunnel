@@ -9,6 +9,27 @@
 
 ---
 
+## v0.3.3 — 2026-10-21
+
+**Fixed**
+
+- `proxy_dialer.go`：为 `pipeStream` 新增 `CloseWrite()` 方法。
+  原先 `xshared/socks5` 的 `pumpTunnel` 对 `stream.(*net.TCPConn)` 类型断言永远失败，
+  导致客户端上行结束后无法通知服务端半关闭，下行 `io.Copy` goroutine 永久阻塞；
+  SOCKS5 信号量与 HotPair refs 均无法释放，空闲连接持续积压直至触发并发上限。
+  `CloseWrite()` 只发送 MsgTCPClose 不关闭源管道，下行还能继续接收服务端剩余数据。
+- 升级 `xshared` 依赖至 `v0.1.4`（配套 `pumpTunnel` 半关闭修复）。
+
+**协议变更**
+
+- 无。仅客户端库资源管理行为变更，服务端无需同步升级。
+
+**升级指引**
+
+- 需配套 `xshared v0.1.4+`；服务端无需升级。
+
+---
+
 ## v0.3.2 — 2026-10-21
 
 **Fixed**
