@@ -397,6 +397,9 @@ func (m *RelayNodeManager) speedTestLoop() {
 }
 
 // testAllNodes 测试所有节点速度并更新评分
+// 使用信号量将并发探测数限制为 maxConcurrentProbes，避免节点数多时同时发起大量 TCP 连接。
+const maxConcurrentProbes = 4
+
 func (m *RelayNodeManager) testAllNodes() {
 	m.refreshHostnameNodes()
 
@@ -405,11 +408,14 @@ func (m *RelayNodeManager) testAllNodes() {
 	copy(nodes, m.nodes)
 	m.mu.RUnlock()
 
+	sem := make(chan struct{}, maxConcurrentProbes)
 	var wg sync.WaitGroup
 	for _, node := range nodes {
 		wg.Add(1)
+		sem <- struct{}{}
 		go func(n *RelayNode) {
 			defer wg.Done()
+			defer func() { <-sem }()
 			if err := m.TestNodeSpeed(n); err != nil {
 				n.mu.Lock()
 				n.Latency = 9999 * time.Second
