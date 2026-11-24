@@ -10,8 +10,8 @@ import (
 	"strconv"
 	"sync"
 	"time"
+	"uuid"
 
-	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 
 	"github.com/v2up-32mb/xshared/dialer"
@@ -43,7 +43,7 @@ func (d *poolStreamDialer) DialStream(ctx context.Context, target string) (net.C
 	if p.config.EnableHotPair && p.pairWarmer != nil {
 		pair = p.pairWarmer.AcquirePrimary()
 	}
-	connID := uuid.NewString()
+	connID := uuid.New().String()
 	if pair != nil {
 		connID = protocol.HotPairConnID(pair.PrebindID, connID)
 	}
@@ -147,7 +147,7 @@ type poolUDPDialer struct{ pool *clientPool }
 // 帧层）与 Send 内双重执行。
 func (d *poolUDPDialer) DialUDP(ctx context.Context, blockedPorts []int) (dialer.UDPChannel, error) {
 	p := d.pool
-	connID := uuid.NewString()
+	connID := uuid.New().String()
 	ch := &poolUDPChannel{
 		pool:    p,
 		connID:  connID,

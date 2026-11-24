@@ -4,8 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
-
-	"github.com/google/uuid"
+	"uuid"
 
 	"github.com/v2up-32mb/xshared/dialer"
 )
@@ -27,7 +26,7 @@ func NewClient(cfg *Config) (*Client, error) {
 	}
 
 	if cfg.ClientID == "" {
-		cfg.ClientID = uuid.NewString()
+		cfg.ClientID = uuid.New().String()
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())

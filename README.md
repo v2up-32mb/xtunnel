@@ -54,7 +54,7 @@ cfg.ReverseListeners = []string{"socks5://user:pass@0.0.0.0:30000"} // 绑定地
 ## 依赖
 
 - `github.com/v2up-32mb/xshared`（ECH/DoH/配置/拨号接口）
-- `github.com/gorilla/websocket`、`github.com/google/uuid`
+- `github.com/gorilla/websocket`、标准库 `uuid`（Go 1.27+）
 
 ## 日志契约（v0.2.3 起）
 

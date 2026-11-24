@@ -7,8 +7,8 @@ import (
 	"net"
 	"sync/atomic"
 	"time"
+	"uuid"
 
-	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 
 	"github.com/v2up-32mb/xshared/pipe"
@@ -87,7 +87,7 @@ func (d *reverseDialer) DialStream(ctx context.Context, target string) (net.Conn
 			entry = e
 		}
 	}
-	connID := uuid.NewString()
+	connID := uuid.New().String()
 	if entry != nil {
 		connID = protocol.HotPairConnID(entry.Key, connID)
 	}

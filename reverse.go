@@ -8,8 +8,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"uuid"
 
-	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/v2up-32mb/xtunnel/protocol"
 )
@@ -295,7 +295,7 @@ func (p *clientPool) getOrCreateListenerID(spec string) string {
 	if id, ok := p.reverseListenerMap[spec]; ok {
 		return id
 	}
-	id := uuid.NewString()
+	id := uuid.New().String()
 	p.reverseListenerMap[spec] = id
 	if p.reverseListenerState == nil {
 		p.reverseListenerState = make(map[string]*reverseListenerState)
