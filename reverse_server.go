@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net"
+	"sync"
 	"sync/atomic"
 	"time"
 	"uuid"
@@ -27,6 +28,9 @@ type ServerReverseConn struct {
 
 	pipe net.Conn // 隧道侧端：MsgTCPData 写入此端（缓冲管道，慢读不阻塞读循环）
 	app  net.Conn // 应用侧端：DialStream 成功后返回给 xshared 隧道泵
+
+	pipeMu     sync.Mutex
+	pipeClosed bool
 
 	settled int32 // atomic：result 是否已定型（防止 close 后再次 close panic）
 	result  chan struct{}
@@ -244,9 +248,16 @@ func (p *serverPool) handleReverseMessage(clientID string, chID int, msgType pro
 		if int(atomic.LoadInt32(&rc.recvCh)) != chID {
 			return
 		}
-		_ = rc.pipe.SetWriteDeadline(time.Now().Add(p.config.WriteTimeout))
-		_, err := rc.pipe.Write(payload)
-		_ = rc.pipe.SetWriteDeadline(time.Time{})
+		var err error
+		rc.pipeMu.Lock()
+		if !rc.pipeClosed {
+			_ = rc.pipe.SetWriteDeadline(time.Now().Add(p.config.WriteTimeout))
+			_, err = rc.pipe.Write(payload)
+			_ = rc.pipe.SetWriteDeadline(time.Time{})
+		} else {
+			err = net.ErrClosed
+		}
+		rc.pipeMu.Unlock()
 		if err != nil {
 			p.reverseNotifyClose(rc)
 			p.removeReverseConn(connID)
@@ -270,7 +281,12 @@ func (p *serverPool) removeReverseConn(connID string) {
 		return
 	}
 	rc.settle(false, "connection closed")
-	_ = rc.pipe.Close()
+	rc.pipeMu.Lock()
+	if !rc.pipeClosed {
+		rc.pipeClosed = true
+		_ = rc.pipe.Close()
+	}
+	rc.pipeMu.Unlock()
 	_ = rc.app.Close()
 }
 

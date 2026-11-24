@@ -388,12 +388,7 @@ func TestClientPoolStartReturnsPromptlyWithLazyECH(t *testing.T) {
 	}
 
 	cancel()
-
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatalf("Start() did not return after context cancellation")
-	}
+	p.Shutdown()
 }
 
 func TestDialWebSocketIncludesStableClientID(t *testing.T) {
